@@ -1,5 +1,5 @@
 require('dotenv').config();
-const { Bot } = require('grammy');
+const { Bot, Keyboard } = require('grammy');
 const cron = require('node-cron');
 
 const bot = new Bot(process.env.BOT_TOKEN);
@@ -8,23 +8,36 @@ const GITHUB_USERNAME = process.env.GITHUB_USERNAME;
 const GITHUB_TOKEN = process.env.GITHUB_TOKEN;
 const CHAT_ID = process.env.MY_TELEGRAM_CHAT_ID;
 
+// Custom Menu Keyboard
+const mainMenu = new Keyboard()
+  .text('📊 Stats Hari Ini')
+  .text('🔥 Trending Global')
+  .row()
+  .text('🐍 Trending Python')
+  .text('🐘 Trending PHP')
+  .resized();
+
 // Helper Fetch GitHub API
 async function fetchGithub(url) {
-  const headers = { 'User-Agent': 'Git-Bot-CLI' };
+  const headers = {
+    'User-Agent': 'Git-Bot-CLI',
+    'Accept': 'application/vnd.github.v3+json'
+  };
   if (GITHUB_TOKEN) headers['Authorization'] = `token ${GITHUB_TOKEN}`;
   const res = await fetch(url, { headers });
   if (!res.ok) throw new Error(`GitHub API Error: ${res.statusText}`);
   return await res.json();
 }
 
-// 1. COMMAND /start
+// 1. COMMAND /start & Menu Utama
 bot.command('start', (ctx) => {
-  ctx.reply(`👋 Halo Boss ${GITHUB_USERNAME}!\n\nBot Monitoring GitHub kamu aktif!\n\nPerintah:\n/trending [bahasa] - Cek repo trending\n/stats - Cek commit harian`);
+  ctx.reply(`👋 Halo Boss ${GITHUB_USERNAME}!\n\nBot Monitoring GitHub kamu aktif 24/7!\nPilih menu di bawah:`, {
+    reply_markup: mainMenu
+  });
 });
 
-// 2. COMMAND /trending [language]
-bot.command('trending', async (ctx) => {
-  const lang = ctx.match ? ctx.match.trim().toLowerCase() : '';
+// Helper Ambil Trending
+async function handleTrending(ctx, lang = '') {
   await ctx.reply(`🔍 Lagi nyari repo trending ${lang ? `berbahasa ${lang}` : 'global'}...`);
 
   try {
@@ -38,7 +51,7 @@ bot.command('trending', async (ctx) => {
     const data = await fetchGithub(`https://api.github.com/search/repositories?q=${encodeURIComponent(query)}&sort=stars&order=desc&per_page=5`);
 
     if (!data.items || data.items.length === 0) {
-      return ctx.reply('⚠️ Nggak nemu repo trending buat kriteria itu.');
+      return ctx.reply('⚠️ Nggak nemu repo trending buat kriteria itu.', { reply_markup: mainMenu });
     }
 
     let msg = `🔥 *GitHub Trending — ${lang ? lang.toUpperCase() : 'Global'}*\n\n`;
@@ -49,24 +62,33 @@ bot.command('trending', async (ctx) => {
       msg += `   🔗 ${item.html_url}\n\n`;
     });
 
-    await ctx.reply(msg, { parse_mode: 'Markdown', disable_web_page_preview: true });
+    await ctx.reply(msg, { parse_mode: 'Markdown', disable_web_page_preview: true, reply_markup: mainMenu });
   } catch (err) {
-    ctx.reply(`❌ Gagal ngambil data trending: ${err.message}`);
+    ctx.reply(`❌ Gagal ngambil data trending: ${err.message}`, { reply_markup: mainMenu });
   }
-});
+}
+
+// Command & Hearing Text buat Trending
+bot.command('trending', (ctx) => handleTrending(ctx, ctx.match ? ctx.match.trim().toLowerCase() : ''));
+bot.hears('🔥 Trending Global', (ctx) => handleTrending(ctx, ''));
+bot.hears('🐍 Trending Python', (ctx) => handleTrending(ctx, 'python'));
+bot.hears('🐘 Trending PHP', (ctx) => handleTrending(ctx, 'php'));
 
 // Helper Ambil Commit Hari Ini
 async function getTodayCommits() {
-  const today = new Date().toISOString().split('T')[0];
-  const events = await fetchGithub(`https://api.github.com/users/${GITHUB_USERNAME}/events`);
+  const todayWib = new Date().toLocaleDateString('sv-SE', { timeZone: 'Asia/Jakarta' });
+  const endpoint = `https://api.github.com/users/${GITHUB_USERNAME}/events`;
+
+  const events = await fetchGithub(endpoint);
 
   let todayCommits = 0;
   const repos = new Set();
 
   events.forEach(event => {
     if (event.type === 'PushEvent') {
-      const eventDate = event.created_at.split('T')[0];
-      if (eventDate === today) {
+      const eventDateWib = new Date(event.created_at).toLocaleDateString('sv-SE', { timeZone: 'Asia/Jakarta' });
+
+      if (eventDateWib === todayWib) {
         todayCommits += event.payload.commits ? event.payload.commits.length : 1;
         repos.add(event.repo.name);
       }
@@ -76,8 +98,8 @@ async function getTodayCommits() {
   return { count: todayCommits, repos: Array.from(repos) };
 }
 
-// 3. COMMAND /stats
-bot.command('stats', async (ctx) => {
+// Handler Stats
+async function handleStats(ctx) {
   try {
     const { count, repos } = await getTodayCommits();
     let msg = `📊 *Statistik Ngoding Hari Ini*\n\n`;
@@ -90,13 +112,16 @@ bot.command('stats', async (ctx) => {
       msg += `  (Belum ada repo yang disentuh hari ini)\n`;
     }
 
-    ctx.reply(msg, { parse_mode: 'Markdown' });
+    ctx.reply(msg, { parse_mode: 'Markdown', reply_markup: mainMenu });
   } catch (err) {
-    ctx.reply(`❌ Gagal ngambil stats: ${err.message}`);
+    ctx.reply(`❌ Gagal ngambil stats: ${err.message}`, { reply_markup: mainMenu });
   }
-});
+}
 
-// 4. CRON JOB: Reminder Streak Jam 19:00 WIB
+bot.command('stats', handleStats);
+bot.hears('📊 Stats Hari Ini', handleStats);
+
+// CRON JOBS
 cron.schedule('0 19 * * *', async () => {
   if (!CHAT_ID) return;
   try {
@@ -111,14 +136,13 @@ cron.schedule('0 19 * * *', async () => {
   } catch (e) {
     console.error('Cron Error:', e.message);
   }
-});
+}, { timezone: 'Asia/Jakarta' });
 
-// 5. CRON JOB: Daily Report Jam 20:00 WIB
 cron.schedule('0 20 * * *', async () => {
   if (!CHAT_ID) return;
   try {
     const { count, repos } = await getTodayCommits();
-    let msg = `🌙 *Daily Digest Ngoding — ${new Date().toLocaleDateString('id-ID')}*\n\n`;
+    let msg = `🌙 *Daily Digest Ngoding — ${new Date().toLocaleDateString('id-ID', { timeZone: 'Asia/Jakarta' })}*\n\n`;
     msg += `🔥 Total Commit Hari Ini: *${count}*\n`;
     if (repos.length > 0) {
       msg += `📂 Repo Terjamah:\n${repos.map(r => `• ${r}`).join('\n')}\n\n`;
@@ -131,7 +155,7 @@ cron.schedule('0 20 * * *', async () => {
   } catch (e) {
     console.error('Cron Error:', e.message);
   }
-});
+}, { timezone: 'Asia/Jakarta' });
 
 // Start Bot
 bot.start();
