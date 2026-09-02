@@ -209,12 +209,16 @@ bot.on('callback_query:data', async (ctx) => {
     }
     else if (data.startsWith('commit_auto:')) {
       const repoKey = decodeURIComponent(data.split(':')[1]);
+      // Ubah teks pesan notif biar tombolnya ilang & gak bisa dipencet 2x
+      await ctx.editMessageText('🔄 *Memproses Auto Commit & Push...*', { parse_mode: 'Markdown' }).catch(() => {});
       executeCommitByKey(ctx, repoKey, null);
     }
     else if (data.startsWith('commit_custom:')) {
       const repoKey = decodeURIComponent(data.split(':')[1]);
       userState[ctx.from.id] = { action: 'awaiting_commit_msg', repoKey: repoKey };
-      await ctx.reply(`✍️ Ketik pesan commit khusus (misal: \`feat: update UI dashboard\`):`, { parse_mode: 'Markdown' });
+      // Ubah teks notif lama biar gak berantakan
+      await ctx.editMessageText('✍️ *Menunggu input pesan commit khusus...*', { parse_mode: 'Markdown' }).catch(() => {});
+      await ctx.reply(`Ketik pesan commit khusus buat repo ini:`);
     }
     else if (data === 'ignore') {
       await ctx.editMessageText('🙈 Perubahan diabaikan.');
