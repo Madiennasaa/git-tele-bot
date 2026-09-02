@@ -253,15 +253,56 @@ bot.on('message:text', async (ctx) => {
 });
 
 // FUNGSI EXECUTE COMMIT (MURNI CONVENTIONAL COMMIT)
+// FUNGSI EXECUTE COMMIT (DETEKSI CONVENTIONAL COMMIT + DETAIL FILE)
 function executeCommitByKey(ctx, repoKey, commitMsg) {
   const [parentDir, repoName] = repoKey.split('::');
   const repoPath = path.join(parentDir, repoName);
 
   sanitizeAndIgnore(repoPath);
 
-  // Murni Conventional Commit tanpa tanggal
-  const defaultMsg = `chore(auto): update project files`;
-  const finalMsg = (commitMsg && commitMsg.trim() !== '') ? commitMsg : defaultMsg;
+  let finalMsg = commitMsg;
+
+  // Kalau Auto Commit (commitMsg null/kosong), racik pesan pintar!
+  if (!finalMsg || finalMsg.trim() === '') {
+    try {
+      // 1. Ambil status file (A = Added, M = Modified, D = Deleted)
+      const statusOutput = execSync(`git -C "${repoPath}" status --porcelain`).toString().trim();
+      const lines = statusOutput.split('\n').filter(Boolean);
+
+      if (lines.length > 0) {
+        let type = 'chore';
+        const fileDetails = [];
+
+        lines.forEach(line => {
+          const status = line.substring(0, 2).trim();
+          const filePath = line.substring(3).trim();
+          const fileName = path.basename(filePath);
+
+          // Tentukan tipe commit berdasarkan status Git
+          if (status.includes('A') || status === '??') {
+            type = 'feat'; // Ada file/fitur baru
+          } else if (status.includes('D')) {
+            type = 'refactor'; // Ada penghapusan/restrukturisasi
+          } else if (status.includes('M') && type !== 'feat') {
+            type = 'fix'; // Edit file yang ada
+          }
+
+          fileDetails.push(`${fileName} (${status})`);
+        });
+
+        // 2. Susun format: "type(scope): detail perubahannya"
+        const scope = repoName.toLowerCase().replace(/[^a-z0-9]/g, '');
+        const summary = fileDetails.slice(0, 3).join(', ');
+        const extraCount = fileDetails.length > 3 ? ` +${fileDetails.length - 3} more` : '';
+
+        finalMsg = `${type}(${scope}): update ${summary}${extraCount}`;
+      } else {
+        finalMsg = `chore(${repoName}): update project files`;
+      }
+    } catch (e) {
+      finalMsg = `chore(${repoName}): update project files`;
+    }
+  }
 
   const safeMsg = finalMsg.replace(/"/g, '\\"');
   const gitCommand = `git -C "${repoPath}" add . && git -C "${repoPath}" commit -m "${safeMsg}" && git -C "${repoPath}" push`;
