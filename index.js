@@ -1,7 +1,7 @@
 require('dotenv').config();
 const { Bot, InlineKeyboard } = require('grammy');
 const chokidar = require('chokidar');
-const { exec, execSync } = require('child_process');
+const { exec } = require('child_process');
 const path = require('path');
 const fs = require('fs');
 
@@ -51,7 +51,7 @@ bot.catch((err) => {
   console.error(`⚠️ Network/Grammy Error:`, err.error || err.message);
 });
 
-console.log(`👀 Bot aktif! Memantau folder:\n${PROJECTS_DIRS.join('\n')}`);
+console.log(`👀 Bot aktif (Fast Async + Smart Parser)! Memantau folder:\n${PROJECTS_DIRS.join('\n')}`);
 
 const userState = {};
 
@@ -69,8 +69,8 @@ async function sendMainMenu(ctx, text = '🤖 *Git Assistant Bot Ready!*\nPilih 
   });
 }
 
-// Helper mastiin .gitignore & bersihin index git dari file sensitif secara SINKRON
-function sanitizeAndIgnore(repoPath) {
+// Helper Async .gitignore & untrack file sensitif
+function sanitizeAndIgnoreAsync(repoPath, callback) {
   const gitignorePath = path.join(repoPath, '.gitignore');
   if (!fs.existsSync(gitignorePath)) {
     fs.writeFileSync(gitignorePath, DEFAULT_GITIGNORE.trim());
@@ -81,9 +81,9 @@ function sanitizeAndIgnore(repoPath) {
     fs.writeFileSync(gitignorePath, content);
   }
 
-  try {
-    execSync(`git -C "${repoPath}" rm -r --cached node_modules .env dist build 2>/dev/null || true`);
-  } catch (e) {}
+  exec(`cd "${repoPath}" && git rm -r --cached node_modules .env dist build 2>/dev/null || true`, () => {
+    if (callback) callback();
+  });
 }
 
 // 1. WATCHER MULTI-PATH
@@ -143,7 +143,7 @@ bot.command('start', async (ctx) => {
   await sendMainMenu(ctx);
 });
 
-// 3. HANDLE CALLBACK QUERY (PENCET TOMBOL)
+// 3. HANDLE CALLBACK QUERY
 bot.on('callback_query:data', async (ctx) => {
   if (ctx.from.id.toString() !== ALLOWED_CHAT_ID.toString()) return;
 
@@ -209,18 +209,16 @@ bot.on('callback_query:data', async (ctx) => {
     }
     else if (data.startsWith('commit_auto:')) {
       const repoKey = decodeURIComponent(data.split(':')[1]);
-      // Ubah teks pesan notif biar tombolnya ilang & gak bisa dipencet 2x
-      await ctx.editMessageText('🔄 *Memproses Auto Commit & Push...*', { parse_mode: 'Markdown' }).catch(() => {});
+      await ctx.editMessageText('🔄 *Menganalisis kode & memproses Push...*', { parse_mode: 'Markdown' }).catch(() => {});
       executeCommitByKey(ctx, repoKey, null);
     }
     else if (data.startsWith('commit_custom:')) {
       const repoKey = decodeURIComponent(data.split(':')[1]);
       userState[ctx.from.id] = { action: 'awaiting_commit_msg', repoKey: repoKey };
-      // Ubah teks notif lama biar gak berantakan
       await ctx.editMessageText('✍️ *Menunggu input pesan commit khusus...*', { parse_mode: 'Markdown' }).catch(() => {});
-      await ctx.reply(`Ketik pesan commit khusus buat repo ini:`);
+      await ctx.reply(`Ketik pesan commit khusus buat repo ini (contoh: \`fix: perbaiki crash saat submit\`):`);
     }
-    else if (data === 'ignore') {
+    else if (data.startsWith('ignore')) {
       await ctx.editMessageText('🙈 Perubahan diabaikan.');
       await sendMainMenu(ctx, '👇 Pilih menu selanjutnya:');
     }
@@ -252,64 +250,83 @@ bot.on('message:text', async (ctx) => {
   }
 });
 
-// FUNGSI EXECUTE COMMIT (MURNI CONVENTIONAL COMMIT)
-// FUNGSI EXECUTE COMMIT (DETEKSI CONVENTIONAL COMMIT + DETAIL FILE)
+// FUNGSI EXECUTE COMMIT (SMART KEYWORD PARSER + FAST ASYNC)
 function executeCommitByKey(ctx, repoKey, commitMsg) {
   const [parentDir, repoName] = repoKey.split('::');
   const repoPath = path.join(parentDir, repoName);
 
-  sanitizeAndIgnore(repoPath);
-
-  let finalMsg = commitMsg;
-
-  // Kalau Auto Commit (commitMsg null/kosong), racik pesan pintar!
-  if (!finalMsg || finalMsg.trim() === '') {
-    try {
-      // 1. Ambil status file (A = Added, M = Modified, D = Deleted)
-      const statusOutput = execSync(`git -C "${repoPath}" status --porcelain`).toString().trim();
-      const lines = statusOutput.split('\n').filter(Boolean);
-
-      if (lines.length > 0) {
-        let type = 'chore';
-        const fileDetails = [];
-
-        lines.forEach(line => {
-          const status = line.substring(0, 2).trim();
-          const filePath = line.substring(3).trim();
-          const fileName = path.basename(filePath);
-
-          // Tentukan tipe commit berdasarkan status Git
-          if (status.includes('A') || status === '??') {
-            type = 'feat'; // Ada file/fitur baru
-          } else if (status.includes('D')) {
-            type = 'refactor'; // Ada penghapusan/restrukturisasi
-          } else if (status.includes('M') && type !== 'feat') {
-            type = 'fix'; // Edit file yang ada
-          }
-
-          fileDetails.push(`${fileName} (${status})`);
-        });
-
-        // 2. Susun format: "type(scope): detail perubahannya"
-        const scope = repoName.toLowerCase().replace(/[^a-z0-9]/g, '');
-        const summary = fileDetails.slice(0, 3).join(', ');
-        const extraCount = fileDetails.length > 3 ? ` +${fileDetails.length - 3} more` : '';
-
-        finalMsg = `${type}(${scope}): update ${summary}${extraCount}`;
-      } else {
-        finalMsg = `chore(${repoName}): update project files`;
-      }
-    } catch (e) {
-      finalMsg = `chore(${repoName}): update project files`;
+  sanitizeAndIgnoreAsync(repoPath, () => {
+    // Kalau udah ada pesan custom, langsung push
+    if (commitMsg && commitMsg.trim() !== '') {
+      return runGitPush(ctx, repoPath, repoName, commitMsg);
     }
-  }
 
+    // Kalau Auto Commit: Baca git diff buat analisis pintar
+    exec(`git -C "${repoPath}" diff`, (diffErr, diffOutput) => {
+      let finalMsg = '';
+      const diffText = (diffOutput || '').toLowerCase();
+      let guessedIntent = '';
+      let type = 'chore';
+
+      // 1. Nebak intent berdasar kata kunci di perubahan kode
+      if (diffText.includes('catch') || diffText.includes('error') || diffText.includes('try')) {
+        type = 'fix';
+        guessedIntent = 'perbaiki penanganan error/crash';
+      } else if (diffText.includes('button') || diffText.includes('click') || diffText.includes('submit') || diffText.includes('onclick')) {
+        type = 'fix';
+        guessedIntent = 'penyesuaian handler aksi tombol atau form';
+      } else if (diffText.includes('route') || diffText.includes('api') || diffText.includes('fetch') || diffText.includes('axios')) {
+        type = 'feat';
+        guessedIntent = 'integrasi atau pembaruan alur data API';
+      } else if (diffText.includes('css') || diffText.includes('class') || diffText.includes('style') || diffText.includes('tailwind')) {
+        type = 'style';
+        guessedIntent = 'pembaruan tampilan dan gaya UI';
+      }
+
+      if (guessedIntent) {
+        finalMsg = `${type}: ${guessedIntent}`;
+        runGitPush(ctx, repoPath, repoName, finalMsg);
+      } else {
+        // 2. Fallback kalau gak nemu kata kunci: Pake nama file bersih
+        exec(`git -C "${repoPath}" status --porcelain`, (statusErr, statusOutput) => {
+          if (!statusErr && statusOutput.trim()) {
+            const lines = statusOutput.trim().split('\n').filter(Boolean);
+            const line = lines[0];
+            const rawStatus = line.substring(0, 2);
+            const filePath = line.trim().replace(/^[\?\sA-Z]+\s+/, '');
+            const fileName = path.basename(filePath);
+
+            let actionText = 'perbaikan pada';
+            if (rawStatus.includes('A') || rawStatus.includes('?')) {
+              type = 'feat';
+              actionText = 'penambahan file';
+            } else if (rawStatus.includes('D')) {
+              type = 'refactor';
+              actionText = 'penghapusan file';
+            } else if (rawStatus.includes('M')) {
+              type = 'fix';
+              actionText = 'pembaruan pada';
+            }
+
+            finalMsg = `${type}(${repoName.toLowerCase()}): ${actionText} ${fileName}`;
+          } else {
+            finalMsg = `chore(${repoName.toLowerCase()}): update project files`;
+          }
+          runGitPush(ctx, repoPath, repoName, finalMsg);
+        });
+      }
+    });
+  });
+}
+
+// Helper Push Async
+function runGitPush(ctx, repoPath, repoName, finalMsg) {
   const safeMsg = finalMsg.replace(/"/g, '\\"');
-  const gitCommand = `git -C "${repoPath}" add . && git -C "${repoPath}" commit -m "${safeMsg}" && git -C "${repoPath}" push`;
+  const gitCommand = `cd "${repoPath}" && git add . && git commit -m "${safeMsg}" && git push`;
 
-  exec(gitCommand, async (error) => {
-    if (error) {
-      await ctx.reply(`❌ *Gagal Commit ${repoName}:*\n\`\`\`\n${error.message}\n\`\`\``, { parse_mode: 'Markdown' });
+  exec(gitCommand, async (pushErr) => {
+    if (pushErr) {
+      await ctx.reply(`❌ *Gagal Commit ${repoName}:*\n\`\`\`\n${pushErr.message}\n\`\`\``, { parse_mode: 'Markdown' });
     } else {
       await ctx.reply(`🚀 *${repoName} Berhasil di-Push!*\n💬 Commit: \`${finalMsg}\``, { parse_mode: 'Markdown' });
     }
@@ -329,9 +346,41 @@ async function createNewRepo(ctx, repoName) {
   await ctx.reply(`⏳ Bikin repo baru \`${repoName}\`...`, { parse_mode: 'Markdown' });
   fs.mkdirSync(repoPath, { recursive: true });
   fs.writeFileSync(path.join(repoPath, 'README.md'), `# ${repoName}\nCreated via Tele Bot.`);
-  sanitizeAndIgnore(repoPath);
 
-  if (GITHUB_TOKEN) {
+  sanitizeAndIgnoreAsync(repoPath, async () => {
+    if (GITHUB_TOKEN) {
+      try {
+        const response = await fetch('https://api.github.com/user/repos', {
+          method: 'POST',
+          headers: { 'Authorization': `token ${GITHUB_TOKEN}`, 'Content-Type': 'application/json', 'User-Agent': 'Node-Bot' },
+          body: JSON.stringify({ name: repoName, private: true })
+        });
+        const data = await response.json();
+        if (!response.ok) throw new Error(data.message);
+
+        const initCmd = `cd "${repoPath}" && git init && git add . && git commit -m "feat: initial project setup" && git branch -M main && git remote add origin ${data.clone_url} && git push -u origin main`;
+        exec(initCmd, async (err) => {
+          if (err) {
+            await ctx.reply(`❌ Gagal Git lokal: ${err.message}`);
+          } else {
+            await ctx.reply(`🚀 *Repo Berhasil Dibuat!*\nGitHub: ${data.html_url}`, { parse_mode: 'Markdown' });
+          }
+          sendMainMenu(ctx, '👇 Pilih menu selanjutnya:');
+        });
+      } catch (err) {
+        await ctx.reply(`❌ Error: ${err.message}`);
+        sendMainMenu(ctx);
+      }
+    }
+  });
+}
+
+async function publishFolderByPath(ctx, repoPath) {
+  const repoName = path.basename(repoPath);
+
+  await ctx.reply(`⏳ Publish folder \`${repoName}\` ke GitHub...`, { parse_mode: 'Markdown' });
+
+  sanitizeAndIgnoreAsync(repoPath, async () => {
     try {
       const response = await fetch('https://api.github.com/user/repos', {
         method: 'POST',
@@ -341,58 +390,29 @@ async function createNewRepo(ctx, repoName) {
       const data = await response.json();
       if (!response.ok) throw new Error(data.message);
 
-      const initCmd = `cd "${repoPath}" && git init && git add . && git commit -m "feat: initial project setup" && git branch -M main && git remote add origin ${data.clone_url} && git push -u origin main`;
-      exec(initCmd, async (err) => {
+      const setupCmd = `cd "${repoPath}" && git init && git branch -M main && (git remote remove origin 2>/dev/null || true) && git remote add origin ${data.clone_url} && git add . && git commit -m "feat: initial release via Tele Bot" && git push -u origin main`;
+
+      exec(setupCmd, (err) => {
         if (err) {
-          await ctx.reply(`❌ Gagal Git lokal: ${err.message}`);
-        } else {
-          await ctx.reply(`🚀 *Repo Berhasil Dibuat!*\nGitHub: ${data.html_url}`, { parse_mode: 'Markdown' });
+          const fallbackCmd = `cd "${repoPath}" && git branch -M main && (git remote remove origin 2>/dev/null || true) && git remote add origin ${data.clone_url} && git push -u origin main`;
+          exec(fallbackCmd, async (fbErr) => {
+            if (fbErr) {
+              await ctx.reply(`❌ Push Gagal: ${fbErr.message}`);
+            } else {
+              await ctx.reply(`🚀 *Folder ${repoName} Published!*\nGitHub: ${data.html_url}`, { parse_mode: 'Markdown' });
+            }
+            sendMainMenu(ctx, '👇 Pilih menu selanjutnya:');
+          });
+          return;
         }
+        ctx.reply(`🚀 *Folder ${repoName} Published!*\nGitHub: ${data.html_url}`, { parse_mode: 'Markdown' });
         sendMainMenu(ctx, '👇 Pilih menu selanjutnya:');
       });
     } catch (err) {
       await ctx.reply(`❌ Error: ${err.message}`);
       sendMainMenu(ctx);
     }
-  }
-}
-
-async function publishFolderByPath(ctx, repoPath) {
-  const repoName = path.basename(repoPath);
-  sanitizeAndIgnore(repoPath);
-
-  await ctx.reply(`⏳ Publish folder \`${repoName}\` ke GitHub...`, { parse_mode: 'Markdown' });
-  try {
-    const response = await fetch('https://api.github.com/user/repos', {
-      method: 'POST',
-      headers: { 'Authorization': `token ${GITHUB_TOKEN}`, 'Content-Type': 'application/json', 'User-Agent': 'Node-Bot' },
-      body: JSON.stringify({ name: repoName, private: true })
-    });
-    const data = await response.json();
-    if (!response.ok) throw new Error(data.message);
-
-    const setupCmd = `cd "${repoPath}" && git init && git branch -M main && (git remote remove origin 2>/dev/null || true) && git remote add origin ${data.clone_url} && git add . && git commit -m "feat: initial release via Tele Bot" && git push -u origin main`;
-
-    exec(setupCmd, (err) => {
-      if (err) {
-        const fallbackCmd = `cd "${repoPath}" && git branch -M main && (git remote remove origin 2>/dev/null || true) && git remote add origin ${data.clone_url} && git push -u origin main`;
-        exec(fallbackCmd, async (fbErr) => {
-          if (fbErr) {
-            await ctx.reply(`❌ Push Gagal: ${fbErr.message}`);
-          } else {
-            await ctx.reply(`🚀 *Folder ${repoName} Published!*\nGitHub: ${data.html_url}`, { parse_mode: 'Markdown' });
-          }
-          sendMainMenu(ctx, '👇 Pilih menu selanjutnya:');
-        });
-        return;
-      }
-      ctx.reply(`🚀 *Folder ${repoName} Published!*\nGitHub: ${data.html_url}`, { parse_mode: 'Markdown' });
-      sendMainMenu(ctx, '👇 Pilih menu selanjutnya:');
-    });
-  } catch (err) {
-    await ctx.reply(`❌ Error: ${err.message}`);
-    sendMainMenu(ctx);
-  }
+  });
 }
 
 // FUNGSI CEK SISA PERUBAHAN PAS BOT BARU NYALA
