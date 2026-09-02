@@ -11,33 +11,42 @@ const ALLOWED_CHAT_ID = process.env.MY_CHAT_ID;
 const GITHUB_TOKEN = process.env.GITHUB_TOKEN;
 const GEMINI_API_KEY = process.env.GEMINI_API_KEY;
 
-// Inisialisasi Gemini Client
 const ai = GEMINI_API_KEY ? new GoogleGenAI({ apiKey: GEMINI_API_KEY }) : null;
 
-// DAFTAR MULTIPLE FOLDER PROJEK
 const PROJECTS_DIRS = [
   path.resolve('/home/ahmad/projects'),
   path.resolve('/mnt/d/Proyek')
 ].filter(dir => fs.existsSync(dir));
 
+// Default .gitignore Multi-Language (Node, Express, PHP/Laravel, Python)
 const DEFAULT_GITIGNORE = `
 # Environment variables
 .env
 .env.local
 .env.*.local
 
-# Dependencies
+# Node / JS
 node_modules/
-/vendor/
-
-# Build & Output
 dist/
 build/
-*.exe
-*.o
-*.so
+npm-debug.log*
 
-# System & IDE files
+# PHP / Laravel
+/vendor/
+bootstrap/cache/
+*.key
+
+# Python
+__pycache__/
+*.pyc
+*.pyo
+*.pyd
+.venv/
+venv/
+env/
+.pytest_cache/
+
+# System & IDE
 .DS_Store
 Thumbs.db
 .vscode/
@@ -55,7 +64,7 @@ bot.catch((err) => {
   console.error(`⚠️ Network/Grammy Error:`, err.error || err.message);
 });
 
-console.log(`👀 Bot aktif (Gemini AI Powered)! Memantau folder:\n${PROJECTS_DIRS.join('\n')}`);
+console.log(`👀 Bot aktif (Multi-Language Powered)! Memantau folder:\n${PROJECTS_DIRS.join('\n')}`);
 
 const userState = {};
 
@@ -77,14 +86,23 @@ function sanitizeAndIgnoreAsync(repoPath, callback) {
   if (!fs.existsSync(gitignorePath)) {
     fs.writeFileSync(gitignorePath, DEFAULT_GITIGNORE.trim());
   }
-  exec(`cd "${repoPath}" && git rm -r --cached node_modules .env dist build 2>/dev/null || true`, () => {
+  // Untrack file sensitif/sampah untuk Node, PHP, dan Python
+  exec(`cd "${repoPath}" && git rm -r --cached node_modules vendor __pycache__ .env dist build 2>/dev/null || true`, () => {
     if (callback) callback();
   });
 }
 
 // 1. WATCHER MULTI-PATH
 const watcher = chokidar.watch(PROJECTS_DIRS, {
-  ignored: [/(^|[\/\\])\../, '**/node_modules/**', '**/vendor/**', '**/dist/**', '**/build/**'],
+  ignored: [
+    /(^|[\/\\])\../,
+    '**/node_modules/**',
+    '**/vendor/**',
+    '**/__pycache__/**',
+    '**/.venv/**',
+    '**/dist/**',
+    '**/build/**'
+  ],
   persistent: true,
   ignoreInitial: true
 });
@@ -273,7 +291,7 @@ ${diffText.substring(0, 3000)}`;
   }
 }
 
-// EXECUTE COMMIT WITH UNTRACKED FILE FIX
+// EXECUTE COMMIT
 function executeCommitByKey(ctx, repoKey, commitMsg) {
   const [parentDir, repoName] = repoKey.split('::');
   const repoPath = path.join(parentDir, repoName);
@@ -283,7 +301,6 @@ function executeCommitByKey(ctx, repoKey, commitMsg) {
       return runGitPush(ctx, repoPath, repoName, commitMsg);
     }
 
-    // Stage sementara dulu (git add .) biar file baru (??) ke-detect sama git diff!
     exec(`cd "${repoPath}" && git add -N . && git diff`, async (diffErr, diffOutput) => {
       let finalMsg = '';
 
@@ -291,7 +308,6 @@ function executeCommitByKey(ctx, repoKey, commitMsg) {
         finalMsg = await generateGeminiCommitMsg(diffOutput);
       }
 
-      // Fallback kalau Gemini API gagal/kosong
       if (!finalMsg) {
         exec(`git -C "${repoPath}" status --porcelain`, (statusErr, statusOutput) => {
           if (!statusErr && statusOutput.trim()) {
