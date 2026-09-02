@@ -1,512 +1,138 @@
 require('dotenv').config();
-const { Bot, InlineKeyboard } = require('grammy');
-const chokidar = require('chokidar');
-const { exec } = require('child_process');
-const path = require('path');
-const fs = require('fs');
-const { GoogleGenAI } = require('@google/genai');
+const { Bot } = require('grammy');
+const cron = require('node-cron');
 
-const TOKEN = process.env.TELEGRAM_TOKEN;
-const ALLOWED_CHAT_ID = process.env.MY_CHAT_ID;
+const bot = new Bot(process.env.BOT_TOKEN);
+
+const GITHUB_USERNAME = process.env.GITHUB_USERNAME;
 const GITHUB_TOKEN = process.env.GITHUB_TOKEN;
-const GEMINI_API_KEY = process.env.GEMINI_API_KEY;
+const CHAT_ID = process.env.MY_TELEGRAM_CHAT_ID;
 
-const ai = GEMINI_API_KEY ? new GoogleGenAI({ apiKey: GEMINI_API_KEY }) : null;
-
-const PROJECTS_DIRS = [
-  path.resolve('/home/ahmad/projects'),
-  path.resolve('/mnt/d/Proyek')
-].filter(dir => fs.existsSync(dir));
-
-const DEFAULT_GITIGNORE = `
-# Environment variables
-.env
-.env.local
-.env.*.local
-
-# Node / JS
-node_modules/
-dist/
-build/
-
-# PHP / Laravel
-/vendor/
-bootstrap/cache/
-*.key
-
-# Python
-__pycache__/
-*.pyc
-.venv/
-venv/
-env/
-
-# System & IDE
-.DS_Store
-Thumbs.db
-.vscode/
-.idea/
-`;
-
-if (!TOKEN || !ALLOWED_CHAT_ID) {
-  console.error('❌ Error: TELEGRAM_TOKEN atau MY_CHAT_ID belum diisi di .env!');
-  process.exit(1);
+// Helper Fetch GitHub API
+async function fetchGithub(url) {
+  const headers = { 'User-Agent': 'Git-Bot-CLI' };
+  if (GITHUB_TOKEN) headers['Authorization'] = `token ${GITHUB_TOKEN}`;
+  const res = await fetch(url, { headers });
+  if (!res.ok) throw new Error(`GitHub API Error: ${res.statusText}`);
+  return await res.json();
 }
 
-const bot = new Bot(TOKEN);
-
-bot.catch((err) => {
-  console.error(`⚠️ Network/Grammy Error:`, err.error || err.message);
+// 1. COMMAND /start
+bot.command('start', (ctx) => {
+  ctx.reply(`👋 Halo Boss ${GITHUB_USERNAME}!\n\nBot Monitoring GitHub kamu aktif!\n\nPerintah:\n/trending [bahasa] - Cek repo trending\n/stats - Cek commit harian`);
 });
 
-console.log(`👀 Bot aktif (Multi-Language + Hype Explorer)! Memantau folder:\n${PROJECTS_DIRS.join('\n')}`);
-
-const userState = {};
-
-// Helper Menu Utama dengan Tombol Repo Hype
-async function sendMainMenu(ctx, text = '🤖 *Git Assistant Bot Ready!*\nPilih aksi di bawah:') {
-  const keyboard = new InlineKeyboard()
-    .text('➕ Bikin Repo Baru', 'action_newrepo').row()
-    .text('📤 Publish Folder Lokal', 'action_publishrepo').row()
-    .text('🔥 Library & Repo Hype', 'action_trending').row()
-    .text('🐙 List Repo GitHub Saya', 'action_listgithub').row()
-    .text('📁 List Folder Lokal', 'action_listrepos');
-
-  await ctx.reply(text, {
-    parse_mode: 'Markdown',
-    reply_markup: keyboard
-  });
-}
-
-function sanitizeAndIgnoreAsync(repoPath, callback) {
-  const gitignorePath = path.join(repoPath, '.gitignore');
-  if (!fs.existsSync(gitignorePath)) {
-    fs.writeFileSync(gitignorePath, DEFAULT_GITIGNORE.trim());
-  }
-  exec(`cd "${repoPath}" && git rm -r --cached node_modules vendor __pycache__ .env dist build 2>/dev/null || true`, () => {
-    if (callback) callback();
-  });
-}
-
-// 1. WATCHER MULTI-PATH
-const watcher = chokidar.watch(PROJECTS_DIRS, {
-  ignored: [/(^|[\/\\])\../, '**/node_modules/**', '**/vendor/**', '**/__pycache__/**', '**/.venv/**', '**/dist/**', '**/build/**'],
-  persistent: true,
-  ignoreInitial: true
-});
-
-let debounceTimer = null;
-let changedFilesByRepo = {};
-
-watcher.on('all', (event, filePath) => {
-  let targetParent = PROJECTS_DIRS.find(d => filePath.startsWith(d));
-  if (!targetParent) return;
-
-  const relative = path.relative(targetParent, filePath);
-  const repoName = relative.split(path.sep)[0];
-  const repoPath = path.join(targetParent, repoName);
-
-  if (!fs.existsSync(path.join(repoPath, '.git'))) return;
-
-  const repoKey = `${targetParent}::${repoName}`;
-  if (!changedFilesByRepo[repoKey]) changedFilesByRepo[repoKey] = new Set();
-
-  const fileRelative = path.relative(repoPath, filePath);
-  changedFilesByRepo[repoKey].add(`${event.toUpperCase()}: ${fileRelative}`);
-
-  clearTimeout(debounceTimer);
-  debounceTimer = setTimeout(() => sendMultiRepoNotification(), 5000);
-});
-
-function sendMultiRepoNotification() {
-  for (const [repoKey, files] of Object.entries(changedFilesByRepo)) {
-    if (files.size === 0) continue;
-
-    const [parentDir, repoName] = repoKey.split('::');
-    const fileList = Array.from(files).join('\n');
-    const message = `📦 *Repo:* \`${repoName}\`\n📍 *Loc:* \`${parentDir}\`\n⚠️ *Perubahan Terdeteksi!*\n\n\`\`\`\n${fileList}\n\`\`\`\nPilih aksi yang mau kamu lakukan:`;
-
-    const keyboard = new InlineKeyboard()
-      .text('✅ Auto Commit (AI)', `commit_auto:${encodeURIComponent(repoKey)}`).row()
-      .text('✏️ Custom Commit Msg', `commit_custom:${encodeURIComponent(repoKey)}`).row()
-      .text('❌ Abaikan', 'ignore');
-
-    bot.api.sendMessage(ALLOWED_CHAT_ID, message, {
-      parse_mode: 'Markdown',
-      reply_markup: keyboard
-    }).catch(err => console.error('Gagal kirim notif:', err.message));
-  }
-  changedFilesByRepo = {};
-}
-
-// 2. /START COMMAND
-bot.command('start', async (ctx) => {
-  if (ctx.chat.id.toString() !== ALLOWED_CHAT_ID.toString()) return;
-  await sendMainMenu(ctx);
-});
-
-// 3. HANDLE CALLBACK QUERY
-bot.on('callback_query:data', async (ctx) => {
-  if (ctx.from.id.toString() !== ALLOWED_CHAT_ID.toString()) return;
-
-  const data = ctx.callbackQuery.data;
+// 2. COMMAND /trending [language]
+bot.command('trending', async (ctx) => {
+  const lang = ctx.match ? ctx.match.trim().toLowerCase() : '';
+  await ctx.reply(`🔍 Lagi nyari repo trending ${lang ? `berbahasa ${lang}` : 'global'}...`);
 
   try {
-    if (data === 'action_newrepo') {
-      userState[ctx.from.id] = { action: 'awaiting_newrepo_name' };
-      await ctx.reply('✍️ Ketik **nama repo baru** yang mau dibuat (di WSL `/home/ahmad/projects/`):');
-    }
-    else if (data === 'action_publishrepo') {
-      const keyboard = new InlineKeyboard();
-      let totalFolder = 0;
+    const date = new Date();
+    date.setDate(date.getDate() - 7);
+    const dateStr = date.toISOString().split('T')[0];
 
-      PROJECTS_DIRS.forEach(parentDir => {
-        const folders = fs.readdirSync(parentDir).filter(f => fs.statSync(path.join(parentDir, f)).isDirectory());
-        folders.forEach(f => {
-          const fullPath = path.join(parentDir, f);
-          keyboard.text(`📁 ${f} (${path.basename(parentDir)})`, `do_publish:${encodeURIComponent(fullPath)}`).row();
-          totalFolder++;
-        });
-      });
+    let query = `created:>${dateStr}`;
+    if (lang) query += ` language:${lang}`;
 
-      if (totalFolder === 0) {
-        await ctx.reply('❌ Nggak ada folder projek ditemukan di path lokal kamu.');
-        return sendMainMenu(ctx);
-      }
+    const data = await fetchGithub(`https://api.github.com/search/repositories?q=${encodeURIComponent(query)}&sort=stars&order=desc&per_page=5`);
 
-      await ctx.reply('👇 *Pilih folder lokal yang mau kamu publish ke GitHub:*', {
-        parse_mode: 'Markdown',
-        reply_markup: keyboard
-      });
-    }
-    else if (data.startsWith('do_publish:')) {
-      const fullPath = decodeURIComponent(data.split(':')[1]);
-      publishFolderByPath(ctx, fullPath);
-    }
-    // FITUR CEK REPO TRENDING DI GITHUB
-    else if (data === 'action_trending') {
-      const keyboard = new InlineKeyboard()
-        .text('🟨 JavaScript / Node', 'fetch_trend:javascript').row()
-        .text('🐍 Python', 'fetch_trend:python').row()
-        .text('🐘 PHP / Laravel', 'fetch_trend:php').row()
-        .text('🟦 Vue.js', 'fetch_trend:vue').row()
-        .text('🔙 Kembali', 'action_backmenu');
-
-      await ctx.reply('🔥 *Pilih ekosistem yang mau kamu cek trending repositori-nya:*', {
-        parse_mode: 'Markdown',
-        reply_markup: keyboard
-      });
-    }
-    else if (data.startsWith('fetch_trend:')) {
-      const lang = data.split(':')[1];
-      await fetchTrendingGithub(ctx, lang);
-    }
-    else if (data === 'action_backmenu') {
-      await sendMainMenu(ctx);
-    }
-    else if (data === 'action_listgithub') {
-      if (!GITHUB_TOKEN) return ctx.reply('❌ `GITHUB_TOKEN` belum diisi di `.env`!');
-      await ctx.reply('⏳ Mengambil daftar repo dari GitHub API...');
-
-      const res = await fetch('https://api.github.com/user/repos?per_page=100&sort=updated', {
-        headers: { 'Authorization': `token ${GITHUB_TOKEN}`, 'User-Agent': 'Node-Bot' }
-      });
-      const repos = await res.json();
-
-      if (!res.ok) {
-        await ctx.reply(`❌ Error API: ${repos.message}`);
-      } else {
-        const listStr = repos.map((r, i) => `${i + 1}. [${r.name}](${r.html_url}) ${r.private ? '🔒' : '🌐'}`).join('\n');
-        await ctx.reply(`🐙 *Daftar Repo GitHub Kamu (${repos.length}):*\n\n${listStr}`, { parse_mode: 'Markdown', disable_web_page_preview: true });
-      }
-      await sendMainMenu(ctx, '👇 Pilih menu selanjutnya:');
-    }
-    else if (data === 'action_listrepos') {
-      let listText = '📂 *Daftar Folder Lokal:*\n\n';
-      PROJECTS_DIRS.forEach(parentDir => {
-        const folders = fs.readdirSync(parentDir).filter(f => fs.statSync(path.join(parentDir, f)).isDirectory());
-        listText += `📍 *${parentDir}*\n${folders.map(f => `  • \`${f}\``).join('\n')}\n\n`;
-      });
-      await ctx.reply(listText, { parse_mode: 'Markdown' });
-      await sendMainMenu(ctx, '👇 Pilih menu selanjutnya:');
-    }
-    else if (data.startsWith('commit_auto:')) {
-      const repoKey = decodeURIComponent(data.split(':')[1]);
-      await ctx.editMessageText('🧠 *Gemini AI sedang menganalisis kode & meracik commit...*', { parse_mode: 'Markdown' }).catch(() => {});
-      executeCommitByKey(ctx, repoKey, null);
-    }
-    else if (data.startsWith('commit_custom:')) {
-      const repoKey = decodeURIComponent(data.split(':')[1]);
-      userState[ctx.from.id] = { action: 'awaiting_commit_msg', repoKey: repoKey };
-      await ctx.editMessageText('✍️ *Menunggu input pesan commit khusus...*', { parse_mode: 'Markdown' }).catch(() => {});
-      await ctx.reply(`Ketik pesan commit khusus buat repo ini:`);
-    }
-    else if (data.startsWith('ignore')) {
-      await ctx.editMessageText('🙈 Perubahan diabaikan.');
-      await sendMainMenu(ctx, '👇 Pilih menu selanjutnya:');
+    if (!data.items || data.items.length === 0) {
+      return ctx.reply('⚠️ Nggak nemu repo trending buat kriteria itu.');
     }
 
-    await ctx.answerCallbackQuery().catch(() => {});
-  } catch (err) {
-    console.error('Callback error:', err.message);
-  }
-});
-
-// 4. HANDLE CHAT BIASA
-bot.on('message:text', async (ctx) => {
-  if (ctx.chat.id.toString() !== ALLOWED_CHAT_ID.toString()) return;
-
-  const state = userState[ctx.from.id];
-  if (!state) return;
-
-  const textInput = ctx.message.text.trim();
-
-  if (state.action === 'awaiting_commit_msg') {
-    const repoKey = state.repoKey;
-    delete userState[ctx.from.id];
-    await ctx.reply(`🔄 Memproses commit: *"${textInput}"*...`, { parse_mode: 'Markdown' });
-    executeCommitByKey(ctx, repoKey, textInput);
-  }
-  else if (state.action === 'awaiting_newrepo_name') {
-    delete userState[ctx.from.id];
-    createNewRepo(ctx, textInput);
-  }
-});
-
-// FUNGSI FETCH REPO TRENDING VIA GITHUB API + RANGKUMAN AI
-async function fetchTrendingGithub(ctx, language) {
-  await ctx.reply(`⏳ *Mencari library & repo ${language} paling ngetren di GitHub...*`, { parse_mode: 'Markdown' });
-
-  try {
-    const response = await fetch(`https://api.github.com/search/repositories?q=language:${language}&sort=stars&order=desc&per_page=5`, {
-      headers: {
-        'User-Agent': 'Node-Bot',
-        ...(GITHUB_TOKEN && { 'Authorization': `token ${GITHUB_TOKEN}` })
-      }
-    });
-
-    const data = await response.json();
-    if (!response.ok) throw new Error(data.message);
-
-    let resultText = `🔥 *Top Trending Repositories (${language.toUpperCase()}):*\n\n`;
-
+    let msg = `🔥 *GitHub Trending — ${lang ? lang.toUpperCase() : 'Global'}*\n\n`;
     data.items.forEach((item, index) => {
-      resultText += `${index + 1}. ⭐ *[${item.name}](${item.html_url})* (${item.stargazers_count.toLocaleString()} stars)\n`;
-      resultText += `📝 _${item.description || 'Tidak ada deskripsi.'}_\n\n`;
+      msg += `${index + 1}. *${item.full_name}*\n`;
+      msg += `   ⭐ +${item.stargazers_count.toLocaleString()} • 🔤 ${item.language || 'Misc'}\n`;
+      msg += `   📝 ${item.description ? item.description.substring(0, 60) + '...' : 'Tanpa deskripsi'}\n`;
+      msg += `   🔗 ${item.html_url}\n\n`;
     });
 
-    await ctx.reply(resultText, { parse_mode: 'Markdown', disable_web_page_preview: true });
-    await sendMainMenu(ctx, '👇 Pilih menu selanjutnya:');
+    await ctx.reply(msg, { parse_mode: 'Markdown', disable_web_page_preview: true });
   } catch (err) {
-    await ctx.reply(`❌ Error mengambil data GitHub: ${err.message}`);
-    sendMainMenu(ctx);
+    ctx.reply(`❌ Gagal ngambil data trending: ${err.message}`);
   }
+});
+
+// Helper Ambil Commit Hari Ini
+async function getTodayCommits() {
+  const today = new Date().toISOString().split('T')[0];
+  const events = await fetchGithub(`https://api.github.com/users/${GITHUB_USERNAME}/events`);
+
+  let todayCommits = 0;
+  const repos = new Set();
+
+  events.forEach(event => {
+    if (event.type === 'PushEvent') {
+      const eventDate = event.created_at.split('T')[0];
+      if (eventDate === today) {
+        todayCommits += event.payload.commits ? event.payload.commits.length : 1;
+        repos.add(event.repo.name);
+      }
+    }
+  });
+
+  return { count: todayCommits, repos: Array.from(repos) };
 }
 
-// FUNGSI GENERATE COMMIT PAKAI GEMINI AI
-async function generateGeminiCommitMsg(diffText) {
-  if (!ai || !diffText || !diffText.trim()) return null;
-
+// 3. COMMAND /stats
+bot.command('stats', async (ctx) => {
   try {
-    const prompt = `You are an expert Git commit generator. Analyze the following git diff output and write a concise, precise, human-like Conventional Commit message in English.
-Use standard prefixes like feat, fix, refactor, style, or chore.
-Rules:
-- Output ONLY the commit message string, nothing else.
-- Do NOT use markdown code blocks or quotes.
-- Keep it under 72 characters.
+    const { count, repos } = await getTodayCommits();
+    let msg = `📊 *Statistik Ngoding Hari Ini*\n\n`;
+    msg += `💬 Total Commit: *${count} commit*\n`;
+    msg += `📂 Repo Aktif (${repos.length}):\n`;
 
-Git Diff:
-${diffText.substring(0, 3000)}`;
-
-    const response = await ai.models.generateContent({
-      model: 'gemini-3.6-flash',
-      contents: prompt,
-    });
-
-    return response.text ? response.text.trim().replace(/^["'`]|["'`]$/g, '') : null;
-  } catch (err) {
-    console.error('⚠️ Gemini API Error:', err.message);
-    return null;
-  }
-}
-
-// EXECUTE COMMIT
-function executeCommitByKey(ctx, repoKey, commitMsg) {
-  const [parentDir, repoName] = repoKey.split('::');
-  const repoPath = path.join(parentDir, repoName);
-
-  sanitizeAndIgnoreAsync(repoPath, () => {
-    if (commitMsg && commitMsg.trim() !== '') {
-      return runGitPush(ctx, repoPath, repoName, commitMsg);
-    }
-
-    exec(`cd "${repoPath}" && git add -N . && git diff`, async (diffErr, diffOutput) => {
-      let finalMsg = '';
-
-      if (diffOutput && diffOutput.trim()) {
-        finalMsg = await generateGeminiCommitMsg(diffOutput);
-      }
-
-      if (!finalMsg) {
-        exec(`git -C "${repoPath}" status --porcelain`, (statusErr, statusOutput) => {
-          if (!statusErr && statusOutput.trim()) {
-            const lines = statusOutput.trim().split('\n').filter(Boolean);
-            const line = lines[0];
-            const rawStatus = line.substring(0, 2);
-            const filePath = line.trim().replace(/^[\?\sA-Z]+\s+/, '');
-            const fileName = path.basename(filePath);
-
-            let type = 'fix';
-            let actionText = 'update';
-
-            if (rawStatus.includes('A') || rawStatus.includes('?')) {
-              type = 'feat';
-              actionText = 'add';
-            } else if (rawStatus.includes('D')) {
-              type = 'refactor';
-              actionText = 'remove';
-            }
-
-            finalMsg = `${type}(${repoName.toLowerCase()}): ${actionText} ${fileName}`;
-          } else {
-            finalMsg = `chore(${repoName.toLowerCase()}): update project files`;
-          }
-          runGitPush(ctx, repoPath, repoName, finalMsg);
-        });
-      } else {
-        runGitPush(ctx, repoPath, repoName, finalMsg);
-      }
-    });
-  });
-}
-
-function runGitPush(ctx, repoPath, repoName, finalMsg) {
-  const safeMsg = finalMsg.replace(/"/g, '\\"');
-  const gitCommand = `cd "${repoPath}" && git add . && git commit -m "${safeMsg}" && git push`;
-
-  exec(gitCommand, async (pushErr) => {
-    if (pushErr) {
-      await ctx.reply(`❌ *Gagal Commit ${repoName}:*\n\`\`\`\n${pushErr.message}\n\`\`\``, { parse_mode: 'Markdown' });
+    if (repos.length > 0) {
+      repos.forEach(r => msg += `  • ${r}\n`);
     } else {
-      await ctx.reply(`🚀 *${repoName} Berhasil di-Push!*\n💬 Commit: \`${finalMsg}\``, { parse_mode: 'Markdown' });
+      msg += `  (Belum ada repo yang disentuh hari ini)\n`;
     }
-    sendMainMenu(ctx, '👇 Pilih menu selanjutnya:');
-  });
-}
 
-async function createNewRepo(ctx, repoName) {
-  const defaultParent = PROJECTS_DIRS[0];
-  const repoPath = path.join(defaultParent, repoName);
-
-  if (fs.existsSync(repoPath)) {
-    await ctx.reply(`⚠️ Folder \`${repoName}\` udah ada!`, { parse_mode: 'Markdown' });
-    return sendMainMenu(ctx);
+    ctx.reply(msg, { parse_mode: 'Markdown' });
+  } catch (err) {
+    ctx.reply(`❌ Gagal ngambil stats: ${err.message}`);
   }
+});
 
-  await ctx.reply(`⏳ Bikin repo baru \`${repoName}\`...`, { parse_mode: 'Markdown' });
-  fs.mkdirSync(repoPath, { recursive: true });
-  fs.writeFileSync(path.join(repoPath, 'README.md'), `# ${repoName}\nCreated via Tele Bot.`);
-
-  sanitizeAndIgnoreAsync(repoPath, async () => {
-    if (GITHUB_TOKEN) {
-      try {
-        const response = await fetch('https://api.github.com/user/repos', {
-          method: 'POST',
-          headers: { 'Authorization': `token ${GITHUB_TOKEN}`, 'Content-Type': 'application/json', 'User-Agent': 'Node-Bot' },
-          body: JSON.stringify({ name: repoName, private: true })
-        });
-        const data = await response.json();
-        if (!response.ok) throw new Error(data.message);
-
-        const initCmd = `cd "${repoPath}" && git init && git add . && git commit -m "feat: initial project setup" && git branch -M main && git remote add origin ${data.clone_url} && git push -u origin main`;
-        exec(initCmd, async (err) => {
-          if (err) {
-            await ctx.reply(`❌ Gagal Git lokal: ${err.message}`);
-          } else {
-            await ctx.reply(`🚀 *Repo Berhasil Dibuat!*\nGitHub: ${data.html_url}`, { parse_mode: 'Markdown' });
-          }
-          sendMainMenu(ctx, '👇 Pilih menu selanjutnya:');
-        });
-      } catch (err) {
-        await ctx.reply(`❌ Error: ${err.message}`);
-        sendMainMenu(ctx);
-      }
+// 4. CRON JOB: Reminder Streak Jam 19:00 WIB
+cron.schedule('0 19 * * *', async () => {
+  if (!CHAT_ID) return;
+  try {
+    const { count } = await getTodayCommits();
+    if (count === 0) {
+      bot.api.sendMessage(
+        CHAT_ID,
+        `⚠️ *STREAK ALERT!*\n\nWoi ${GITHUB_USERNAME}! Udah jam 7 malam tapi belum ada commit sama sekali hari ini 🙈\nMinimal push 1 baris kode gih pakai \`git ac\` biar streak ngoding gak putus!`,
+        { parse_mode: 'Markdown' }
+      );
     }
-  });
-}
+  } catch (e) {
+    console.error('Cron Error:', e.message);
+  }
+});
 
-async function publishFolderByPath(ctx, repoPath) {
-  const repoName = path.basename(repoPath);
-
-  await ctx.reply(`⏳ Publish folder \`${repoName}\` ke GitHub...`, { parse_mode: 'Markdown' });
-
-  sanitizeAndIgnoreAsync(repoPath, async () => {
-    try {
-      const response = await fetch('https://api.github.com/user/repos', {
-        method: 'POST',
-        headers: { 'Authorization': `token ${GITHUB_TOKEN}`, 'Content-Type': 'application/json', 'User-Agent': 'Node-Bot' },
-        body: JSON.stringify({ name: repoName, private: true })
-      });
-      const data = await response.json();
-      if (!response.ok) throw new Error(data.message);
-
-      const setupCmd = `cd "${repoPath}" && git init && git branch -M main && (git remote remove origin 2>/dev/null || true) && git remote add origin ${data.clone_url} && git add . && git commit -m "feat: initial release via Tele Bot" && git push -u origin main`;
-
-      exec(setupCmd, (err) => {
-        if (err) {
-          const fallbackCmd = `cd "${repoPath}" && git branch -M main && (git remote remove origin 2>/dev/null || true) && git remote add origin ${data.clone_url} && git push -u origin main`;
-          exec(fallbackCmd, async (fbErr) => {
-            if (fbErr) {
-              await ctx.reply(`❌ Push Gagal: ${fbErr.message}`);
-            } else {
-              await ctx.reply(`🚀 *Folder ${repoName} Published!*\nGitHub: ${data.html_url}`, { parse_mode: 'Markdown' });
-            }
-            sendMainMenu(ctx, '👇 Pilih menu selanjutnya:');
-          });
-          return;
-        }
-        ctx.reply(`🚀 *Folder ${repoName} Published!*\nGitHub: ${data.html_url}`, { parse_mode: 'Markdown' });
-        sendMainMenu(ctx, '👇 Pilih menu selanjutnya:');
-      });
-    } catch (err) {
-      await ctx.reply(`❌ Error: ${err.message}`);
-      sendMainMenu(ctx);
+// 5. CRON JOB: Daily Report Jam 20:00 WIB
+cron.schedule('0 20 * * *', async () => {
+  if (!CHAT_ID) return;
+  try {
+    const { count, repos } = await getTodayCommits();
+    let msg = `🌙 *Daily Digest Ngoding — ${new Date().toLocaleDateString('id-ID')}*\n\n`;
+    msg += `🔥 Total Commit Hari Ini: *${count}*\n`;
+    if (repos.length > 0) {
+      msg += `📂 Repo Terjamah:\n${repos.map(r => `• ${r}`).join('\n')}\n\n`;
+      msg += `Mantap! Pertahankan konsistensinya boss! 💪`;
+    } else {
+      msg += `\nHari ini gak ada commit. Jangan lupa istirahat yang cukup biar besok fokus lagi! 👍`;
     }
-  });
-}
 
-function checkPendingGitChanges() {
-  PROJECTS_DIRS.forEach(parentDir => {
-    if (!fs.existsSync(parentDir)) return;
+    bot.api.sendMessage(CHAT_ID, msg, { parse_mode: 'Markdown' });
+  } catch (e) {
+    console.error('Cron Error:', e.message);
+  }
+});
 
-    const folders = fs.readdirSync(parentDir).filter(f => fs.statSync(path.join(parentDir, f)).isDirectory());
-
-    folders.forEach(repoName => {
-      const repoPath = path.join(parentDir, repoName);
-      if (!fs.existsSync(path.join(repoPath, '.git'))) return;
-
-      exec(`git -C "${repoPath}" status --porcelain`, (err, stdout) => {
-        if (err || !stdout.trim()) return;
-
-        const repoKey = `${parentDir}::${repoName}`;
-        const fileList = stdout.trim();
-
-        const message = `📦 *Repo:* \`${repoName}\`\n📍 *Loc:* \`${parentDir}\`\n⚠️ *Perubahan Ditemukan Pas Bot Startup!*\n\n\`\`\`\n${fileList}\n\`\`\`\nPilih aksi:`;
-
-        const keyboard = new InlineKeyboard()
-          .text('✅ Auto Commit (AI)', `commit_auto:${encodeURIComponent(repoKey)}`).row()
-          .text('✏️ Custom Commit Msg', `commit_custom:${encodeURIComponent(repoKey)}`).row()
-          .text('❌ Abaikan', 'ignore');
-
-        bot.api.sendMessage(ALLOWED_CHAT_ID, message, {
-          parse_mode: 'Markdown',
-          reply_markup: keyboard
-        }).catch(() => {});
-      });
-    });
-  });
-}
-
-checkPendingGitChanges();
-
+// Start Bot
 bot.start();
+console.log('🤖 Bot Telegram GitHub Monitoring udah jalan...');
