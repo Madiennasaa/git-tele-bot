@@ -18,7 +18,6 @@ const PROJECTS_DIRS = [
   path.resolve('/mnt/d/Proyek')
 ].filter(dir => fs.existsSync(dir));
 
-// Default .gitignore Multi-Language (Node, Express, PHP/Laravel, Python)
 const DEFAULT_GITIGNORE = `
 # Environment variables
 .env
@@ -29,7 +28,6 @@ const DEFAULT_GITIGNORE = `
 node_modules/
 dist/
 build/
-npm-debug.log*
 
 # PHP / Laravel
 /vendor/
@@ -39,12 +37,9 @@ bootstrap/cache/
 # Python
 __pycache__/
 *.pyc
-*.pyo
-*.pyd
 .venv/
 venv/
 env/
-.pytest_cache/
 
 # System & IDE
 .DS_Store
@@ -64,14 +59,16 @@ bot.catch((err) => {
   console.error(`⚠️ Network/Grammy Error:`, err.error || err.message);
 });
 
-console.log(`👀 Bot aktif (Multi-Language Powered)! Memantau folder:\n${PROJECTS_DIRS.join('\n')}`);
+console.log(`👀 Bot aktif (Multi-Language + Hype Explorer)! Memantau folder:\n${PROJECTS_DIRS.join('\n')}`);
 
 const userState = {};
 
+// Helper Menu Utama dengan Tombol Repo Hype
 async function sendMainMenu(ctx, text = '🤖 *Git Assistant Bot Ready!*\nPilih aksi di bawah:') {
   const keyboard = new InlineKeyboard()
     .text('➕ Bikin Repo Baru', 'action_newrepo').row()
     .text('📤 Publish Folder Lokal', 'action_publishrepo').row()
+    .text('🔥 Library & Repo Hype', 'action_trending').row()
     .text('🐙 List Repo GitHub Saya', 'action_listgithub').row()
     .text('📁 List Folder Lokal', 'action_listrepos');
 
@@ -86,7 +83,6 @@ function sanitizeAndIgnoreAsync(repoPath, callback) {
   if (!fs.existsSync(gitignorePath)) {
     fs.writeFileSync(gitignorePath, DEFAULT_GITIGNORE.trim());
   }
-  // Untrack file sensitif/sampah untuk Node, PHP, dan Python
   exec(`cd "${repoPath}" && git rm -r --cached node_modules vendor __pycache__ .env dist build 2>/dev/null || true`, () => {
     if (callback) callback();
   });
@@ -94,15 +90,7 @@ function sanitizeAndIgnoreAsync(repoPath, callback) {
 
 // 1. WATCHER MULTI-PATH
 const watcher = chokidar.watch(PROJECTS_DIRS, {
-  ignored: [
-    /(^|[\/\\])\../,
-    '**/node_modules/**',
-    '**/vendor/**',
-    '**/__pycache__/**',
-    '**/.venv/**',
-    '**/dist/**',
-    '**/build/**'
-  ],
+  ignored: [/(^|[\/\\])\../, '**/node_modules/**', '**/vendor/**', '**/__pycache__/**', '**/.venv/**', '**/dist/**', '**/build/**'],
   persistent: true,
   ignoreInitial: true
 });
@@ -195,6 +183,27 @@ bot.on('callback_query:data', async (ctx) => {
       const fullPath = decodeURIComponent(data.split(':')[1]);
       publishFolderByPath(ctx, fullPath);
     }
+    // FITUR CEK REPO TRENDING DI GITHUB
+    else if (data === 'action_trending') {
+      const keyboard = new InlineKeyboard()
+        .text('🟨 JavaScript / Node', 'fetch_trend:javascript').row()
+        .text('🐍 Python', 'fetch_trend:python').row()
+        .text('🐘 PHP / Laravel', 'fetch_trend:php').row()
+        .text('🟦 Vue.js', 'fetch_trend:vue').row()
+        .text('🔙 Kembali', 'action_backmenu');
+
+      await ctx.reply('🔥 *Pilih ekosistem yang mau kamu cek trending repositori-nya:*', {
+        parse_mode: 'Markdown',
+        reply_markup: keyboard
+      });
+    }
+    else if (data.startsWith('fetch_trend:')) {
+      const lang = data.split(':')[1];
+      await fetchTrendingGithub(ctx, lang);
+    }
+    else if (data === 'action_backmenu') {
+      await sendMainMenu(ctx);
+    }
     else if (data === 'action_listgithub') {
       if (!GITHUB_TOKEN) return ctx.reply('❌ `GITHUB_TOKEN` belum diisi di `.env`!');
       await ctx.reply('⏳ Mengambil daftar repo dari GitHub API...');
@@ -263,6 +272,36 @@ bot.on('message:text', async (ctx) => {
     createNewRepo(ctx, textInput);
   }
 });
+
+// FUNGSI FETCH REPO TRENDING VIA GITHUB API + RANGKUMAN AI
+async function fetchTrendingGithub(ctx, language) {
+  await ctx.reply(`⏳ *Mencari library & repo ${language} paling ngetren di GitHub...*`, { parse_mode: 'Markdown' });
+
+  try {
+    const response = await fetch(`https://api.github.com/search/repositories?q=language:${language}&sort=stars&order=desc&per_page=5`, {
+      headers: {
+        'User-Agent': 'Node-Bot',
+        ...(GITHUB_TOKEN && { 'Authorization': `token ${GITHUB_TOKEN}` })
+      }
+    });
+
+    const data = await response.json();
+    if (!response.ok) throw new Error(data.message);
+
+    let resultText = `🔥 *Top Trending Repositories (${language.toUpperCase()}):*\n\n`;
+
+    data.items.forEach((item, index) => {
+      resultText += `${index + 1}. ⭐ *[${item.name}](${item.html_url})* (${item.stargazers_count.toLocaleString()} stars)\n`;
+      resultText += `📝 _${item.description || 'Tidak ada deskripsi.'}_\n\n`;
+    });
+
+    await ctx.reply(resultText, { parse_mode: 'Markdown', disable_web_page_preview: true });
+    await sendMainMenu(ctx, '👇 Pilih menu selanjutnya:');
+  } catch (err) {
+    await ctx.reply(`❌ Error mengambil data GitHub: ${err.message}`);
+    sendMainMenu(ctx);
+  }
+}
 
 // FUNGSI GENERATE COMMIT PAKAI GEMINI AI
 async function generateGeminiCommitMsg(diffText) {
