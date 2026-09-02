@@ -259,9 +259,8 @@ function executeCommitByKey(ctx, repoKey, commitMsg) {
   // Sanitasi file sensitif & gitignore secara sinkron
   sanitizeAndIgnore(repoPath);
 
-  // Standar Conventional Commit untuk Auto Commit
-  const dateStr = new Date().toISOString().split('T')[0];
-  const defaultMsg = `chore(auto): update project files [${dateStr}]`;
+  // Standar Conventional Commit murni
+  const defaultMsg = `chore(auto): update project files`;
   const finalMsg = (commitMsg && commitMsg.trim() !== '') ? commitMsg : defaultMsg;
 
   const safeMsg = finalMsg.replace(/"/g, '\\"');
