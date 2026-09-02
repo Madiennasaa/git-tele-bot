@@ -69,7 +69,7 @@ async function sendMainMenu(ctx, text = '🤖 *Git Assistant Bot Ready!*\nPilih 
   });
 }
 
-// Helper mastiin .gitignore & bersihin index git dari file sensitif secara SINKRON (execSync)
+// Helper mastiin .gitignore & bersihin index git dari file sensitif secara SINKRON
 function sanitizeAndIgnore(repoPath) {
   const gitignorePath = path.join(repoPath, '.gitignore');
   if (!fs.existsSync(gitignorePath)) {
@@ -81,12 +81,9 @@ function sanitizeAndIgnore(repoPath) {
     fs.writeFileSync(gitignorePath, content);
   }
 
-  // Untrack file sensitif secara sinkron biar beneran hilang dari remote GitHub
   try {
     execSync(`git -C "${repoPath}" rm -r --cached node_modules .env dist build 2>/dev/null || true`);
-  } catch (e) {
-    // Ignore error kalau file emang belum pernah ter-track
-  }
+  } catch (e) {}
 }
 
 // 1. WATCHER MULTI-PATH
@@ -212,7 +209,7 @@ bot.on('callback_query:data', async (ctx) => {
     }
     else if (data.startsWith('commit_auto:')) {
       const repoKey = decodeURIComponent(data.split(':')[1]);
-      executeCommitByKey(ctx, repoKey, null); // Send null biar pake Conventional Commit!
+      executeCommitByKey(ctx, repoKey, null);
     }
     else if (data.startsWith('commit_custom:')) {
       const repoKey = decodeURIComponent(data.split(':')[1]);
@@ -251,15 +248,14 @@ bot.on('message:text', async (ctx) => {
   }
 });
 
-// FUNGSI EXECUTE COMMIT (STANDAR CONVENTIONAL COMMITS)
+// FUNGSI EXECUTE COMMIT (MURNI CONVENTIONAL COMMIT)
 function executeCommitByKey(ctx, repoKey, commitMsg) {
   const [parentDir, repoName] = repoKey.split('::');
   const repoPath = path.join(parentDir, repoName);
 
-  // Sanitasi file sensitif & gitignore secara sinkron
   sanitizeAndIgnore(repoPath);
 
-  // Standar Conventional Commit murni
+  // Murni Conventional Commit tanpa tanggal
   const defaultMsg = `chore(auto): update project files`;
   const finalMsg = (commitMsg && commitMsg.trim() !== '') ? commitMsg : defaultMsg;
 
