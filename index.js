@@ -6,12 +6,31 @@ const path = require('path');
 
 const bot = new Bot(process.env.BOT_TOKEN);
 
+// --- Health check server ---
+// Bot ini jalan pakai long polling (bot.start()), jadi nggak pernah buka port apapun.
+// Banyak platform hosting (Northflank, Render, dll) ngecek "container hidup atau nggak"
+// dengan cara nge-hit suatu port — kalau nggak ada yang listen, bisa dianggap unhealthy
+// dan di-restart-loop terus. Server kecil ini cuma buat jawab health check itu,
+// nggak ada hubungannya sama logic bot.
+const http = require('http');
+const HEALTH_PORT = process.env.PORT || 3000;
+http.createServer((req, res) => {
+  res.writeHead(200, { 'Content-Type': 'text/plain' });
+  res.end('OK');
+}).listen(HEALTH_PORT, () => {
+  console.log(`🩺 Health check server jalan di port ${HEALTH_PORT}`);
+});
+
 const GITHUB_USERNAME = process.env.GITHUB_USERNAME;
 const GITHUB_TOKEN = process.env.GITHUB_TOKEN;
 const CHAT_ID = process.env.MY_TELEGRAM_CHAT_ID;
 
 // --- State persistence (buat catch-up kalau bot sempat mati) ---
-const STATE_FILE = path.join(__dirname, '.bot-state.json');
+// Path bisa di-override lewat env var STATE_DIR — dipakai buat arahin ke folder
+// yang di-mount sebagai persistent volume (misal di Northflank), biar data ini
+// nggak ilang tiap kali container di-redeploy/restart.
+const STATE_DIR = process.env.STATE_DIR || __dirname;
+const STATE_FILE = path.join(STATE_DIR, '.bot-state.json');
 
 function loadState() {
   try {
