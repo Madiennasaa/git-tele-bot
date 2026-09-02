@@ -4,10 +4,15 @@ const chokidar = require('chokidar');
 const { exec } = require('child_process');
 const path = require('path');
 const fs = require('fs');
+const { GoogleGenAI } = require('@google/genai');
 
 const TOKEN = process.env.TELEGRAM_TOKEN;
 const ALLOWED_CHAT_ID = process.env.MY_CHAT_ID;
 const GITHUB_TOKEN = process.env.GITHUB_TOKEN;
+const GEMINI_API_KEY = process.env.GEMINI_API_KEY;
+
+// Inisialisasi Gemini Client
+const ai = GEMINI_API_KEY ? new GoogleGenAI({ apiKey: GEMINI_API_KEY }) : null;
 
 // DAFTAR MULTIPLE FOLDER PROJEK
 const PROJECTS_DIRS = [
@@ -50,7 +55,7 @@ bot.catch((err) => {
   console.error(`⚠️ Network/Grammy Error:`, err.error || err.message);
 });
 
-console.log(`👀 Bot aktif (Fast Descriptive Engine)! Memantau folder:\n${PROJECTS_DIRS.join('\n')}`);
+console.log(`👀 Bot aktif (Gemini AI Powered)! Memantau folder:\n${PROJECTS_DIRS.join('\n')}`);
 
 const userState = {};
 
@@ -116,7 +121,7 @@ function sendMultiRepoNotification() {
     const message = `📦 *Repo:* \`${repoName}\`\n📍 *Loc:* \`${parentDir}\`\n⚠️ *Perubahan Terdeteksi!*\n\n\`\`\`\n${fileList}\n\`\`\`\nPilih aksi yang mau kamu lakukan:`;
 
     const keyboard = new InlineKeyboard()
-      .text('✅ Auto Commit', `commit_auto:${encodeURIComponent(repoKey)}`).row()
+      .text('✅ Auto Commit (AI)', `commit_auto:${encodeURIComponent(repoKey)}`).row()
       .text('✏️ Custom Commit Msg', `commit_custom:${encodeURIComponent(repoKey)}`).row()
       .text('❌ Abaikan', 'ignore');
 
@@ -200,7 +205,7 @@ bot.on('callback_query:data', async (ctx) => {
     }
     else if (data.startsWith('commit_auto:')) {
       const repoKey = decodeURIComponent(data.split(':')[1]);
-      await ctx.editMessageText('🔄 *Menganalisis diff & memproses Push...*', { parse_mode: 'Markdown' }).catch(() => {});
+      await ctx.editMessageText('🧠 *Gemini AI sedang menganalisis kodedu & meracik commit...*', { parse_mode: 'Markdown' }).catch(() => {});
       executeCommitByKey(ctx, repoKey, null);
     }
     else if (data.startsWith('commit_custom:')) {
@@ -241,7 +246,34 @@ bot.on('message:text', async (ctx) => {
   }
 });
 
-// DESCRIPTIVE ENGLISH COMMIT ENGINE
+// FUNGSI GENERATE COMMIT PAKAI GEMINI AI
+async function generateGeminiCommitMsg(diffText) {
+  if (!ai || !diffText || !diffText.trim()) return null;
+
+  try {
+    const prompt = `You are an expert Git commit generator. Analyze the following git diff output and write a concise, precise, human-like Conventional Commit message in English.
+Use standard prefixes like feat, fix, refactor, style, or chore.
+Rules:
+- Output ONLY the commit message string, nothing else.
+- Do NOT use markdown code blocks or quotes.
+- Keep it under 72 characters.
+
+Git Diff:
+${diffText.substring(0, 3000)}`;
+
+    const response = await ai.models.generateContent({
+      model: 'gemini-2.5-flash',
+      contents: prompt,
+    });
+
+    return response.text ? response.text.trim().replace(/^["'`]|["'`]$/g, '') : null;
+  } catch (err) {
+    console.error('⚠️ Gemini API Error:', err.message);
+    return null;
+  }
+}
+
+// EXECUTE COMMIT WITH GEMINI FALLBACK
 function executeCommitByKey(ctx, repoKey, commitMsg) {
   const [parentDir, repoName] = repoKey.split('::');
   const repoPath = path.join(parentDir, repoName);
@@ -251,25 +283,15 @@ function executeCommitByKey(ctx, repoKey, commitMsg) {
       return runGitPush(ctx, repoPath, repoName, commitMsg);
     }
 
-    // Ambil diff ringkas (maksimal 50 baris pertama biar tetep wus-wus!)
-    exec(`git -C "${repoPath}" diff -U0 | head -n 50`, (diffErr, diffOutput) => {
+    // Ambil diff buat diisi ke Gemini AI
+    exec(`git -C "${repoPath}" diff`, async (diffErr, diffOutput) => {
       let finalMsg = '';
-      const diffText = (diffOutput || '').toLowerCase();
 
-      // Smart Action Pattern Matcher (English)
-      if (diffText.includes('prevent') || diffText.includes('disabled') || diffText.includes('once') || diffText.includes('debounce')) {
-        finalMsg = 'fix: prevent duplicate submit action and crash issues';
-      } else if (diffText.includes('catch') || diffText.includes('error') || diffText.includes('try')) {
-        finalMsg = 'fix: handle unexpected exception and error crash flow';
-      } else if (diffText.includes('button') || diffText.includes('click') || diffText.includes('submit') || diffText.includes('onclick')) {
-        finalMsg = 'fix: update button click and form submission handler';
-      } else if (diffText.includes('route') || diffText.includes('api') || diffText.includes('fetch') || diffText.includes('axios')) {
-        finalMsg = 'feat: refactor API integration and data fetching logic';
-      } else if (diffText.includes('css') || diffText.includes('class') || diffText.includes('style') || diffText.includes('tailwind')) {
-        finalMsg = 'style: refine UI components layout and styling';
+      if (diffOutput && diffOutput.trim()) {
+        finalMsg = await generateGeminiCommitMsg(diffOutput);
       }
 
-      // Fallback kalau nggak nemu kata kunci spesifik
+      // Fallback kalau API Error atau diff kosong
       if (!finalMsg) {
         exec(`git -C "${repoPath}" status --porcelain`, (statusErr, statusOutput) => {
           if (!statusErr && statusOutput.trim()) {
@@ -288,9 +310,6 @@ function executeCommitByKey(ctx, repoKey, commitMsg) {
             } else if (rawStatus.includes('D')) {
               type = 'refactor';
               actionText = 'remove';
-            } else if (rawStatus.includes('M')) {
-              type = 'fix';
-              actionText = 'update';
             }
 
             finalMsg = `${type}(${repoName.toLowerCase()}): ${actionText} ${fileName}`;
@@ -420,7 +439,7 @@ function checkPendingGitChanges() {
         const message = `📦 *Repo:* \`${repoName}\`\n📍 *Loc:* \`${parentDir}\`\n⚠️ *Perubahan Ditemukan Pas Bot Startup!*\n\n\`\`\`\n${fileList}\n\`\`\`\nPilih aksi:`;
 
         const keyboard = new InlineKeyboard()
-          .text('✅ Auto Commit', `commit_auto:${encodeURIComponent(repoKey)}`).row()
+          .text('✅ Auto Commit (AI)', `commit_auto:${encodeURIComponent(repoKey)}`).row()
           .text('✏️ Custom Commit Msg', `commit_custom:${encodeURIComponent(repoKey)}`).row()
           .text('❌ Abaikan', 'ignore');
 
