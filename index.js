@@ -10,13 +10,12 @@ const ALLOWED_CHAT_ID = process.env.MY_CHAT_ID;
 const GITHUB_TOKEN = process.env.GITHUB_TOKEN;
 
 // DAFTAR MULTIPLE FOLDER PROJEK (WSL + WINDOWS MOUNT)
-// Kalo di WSL, akses D: Windows pake /mnt/d/
 const PROJECTS_DIRS = [
   path.resolve('/home/ahmad/projects'),
-  path.resolve('/mnt/d/Proyek') // Sesuaikan kalo kamu pake WSL akses drive D Windows
-].filter(dir => fs.existsSync(dir)); // Cuma ambil folder yang beneran ada
+  path.resolve('/mnt/d/Proyek')
+].filter(dir => fs.existsSync(dir));
 
-// Isi standar .gitignore otomatis biar aman!
+// Standar .gitignore otomatis
 const DEFAULT_GITIGNORE = `
 # Environment variables
 .env
@@ -56,7 +55,7 @@ console.log(`👀 Bot aktif! Memantau folder:\n${PROJECTS_DIRS.join('\n')}`);
 
 const userState = {};
 
-// Helper buat Menu Utama
+// Helper Menu Utama
 async function sendMainMenu(ctx, text = '🤖 *Git Assistant Bot Ready!*\nPilih aksi di bawah:') {
   const keyboard = new InlineKeyboard()
     .text('➕ Bikin Repo Baru', 'action_newrepo').row()
@@ -70,6 +69,27 @@ async function sendMainMenu(ctx, text = '🤖 *Git Assistant Bot Ready!*\nPilih 
   });
 }
 
+// Helper mastiin .gitignore & bersihin index git dari file sensitif yang terlanjur ke-commit
+function sanitizeAndIgnore(repoPath) {
+  const gitignorePath = path.join(repoPath, '.gitignore');
+  if (!fs.existsSync(gitignorePath)) {
+    fs.writeFileSync(gitignorePath, DEFAULT_GITIGNORE.trim());
+  } else {
+    let content = fs.readFileSync(gitignorePath, 'utf8');
+    if (!content.includes('.env')) content += '\n.env\n';
+    if (!content.includes('node_modules')) content += '\nnode_modules/\n';
+    fs.writeFileSync(gitignorePath, content);
+  }
+
+  // Untrack file sensitif dari cache Git biar hilang dari remote/GitHub (file lokal tetep ada)
+  const untrackCmd = `cd "${repoPath}" && git rm -r --cached node_modules .env dist build 2>/dev/null || true`;
+  try {
+    exec(untrackCmd);
+  } catch (e) {
+    // ignore error kalau file emang belum pernah di-track
+  }
+}
+
 // 1. WATCHER MULTI-PATH
 const watcher = chokidar.watch(PROJECTS_DIRS, {
   ignored: [/(^|[\/\\])\../, '**/node_modules/**', '**/vendor/**', '**/dist/**', '**/build/**'],
@@ -81,7 +101,6 @@ let debounceTimer = null;
 let changedFilesByRepo = {};
 
 watcher.on('all', (event, filePath) => {
-  // Cari folder projek parent dari file yang berubah
   let targetParent = PROJECTS_DIRS.find(d => filePath.startsWith(d));
   if (!targetParent) return;
 
@@ -122,19 +141,6 @@ function sendMultiRepoNotification() {
   changedFilesByRepo = {};
 }
 
-// Helper buat mastiin .gitignore aman sebelum commit
-function ensureGitignore(repoPath) {
-  const gitignorePath = path.join(repoPath, '.gitignore');
-  if (!fs.existsSync(gitignorePath)) {
-    fs.writeFileSync(gitignorePath, DEFAULT_GITIGNORE.trim());
-  } else {
-    let content = fs.readFileSync(gitignorePath, 'utf8');
-    if (!content.includes('.env')) content += '\n.env\n';
-    if (!content.includes('node_modules')) content += '\nnode_modules/\n';
-    fs.writeFileSync(gitignorePath, content);
-  }
-}
-
 // 2. /START COMMAND
 bot.command('start', async (ctx) => {
   if (ctx.chat.id.toString() !== ALLOWED_CHAT_ID.toString()) return;
@@ -153,7 +159,6 @@ bot.on('callback_query:data', async (ctx) => {
       await ctx.reply('✍️ Ketik **nama repo baru** yang mau dibuat (di WSL `/home/ahmad/projects/`):');
     }
     else if (data === 'action_publishrepo') {
-      // AMBIL SEMUA FOLDER DARI DAFTAR PROJECTS_DIRS TERUS TAMPILIN JADI TOMBOL!
       const keyboard = new InlineKeyboard();
       let totalFolder = 0;
 
@@ -208,12 +213,12 @@ bot.on('callback_query:data', async (ctx) => {
     }
     else if (data.startsWith('commit_auto:')) {
       const repoKey = decodeURIComponent(data.split(':')[1]);
-      executeCommitByKey(ctx, repoKey, `Auto-commit via Tele Bot [${new Date().toLocaleTimeString()}]`);
+      executeCommitByKey(ctx, repoKey, null); // null biar pake default Conventional Commit
     }
     else if (data.startsWith('commit_custom:')) {
       const repoKey = decodeURIComponent(data.split(':')[1]);
       userState[ctx.from.id] = { action: 'awaiting_commit_msg', repoKey: repoKey };
-      await ctx.reply(`✍️ Ketik pesan commit khusus:`, { parse_mode: 'Markdown' });
+      await ctx.reply(`✍️ Ketik pesan commit khusus (misal: \`feat: update UI dashboard\`):`, { parse_mode: 'Markdown' });
     }
     else if (data === 'ignore') {
       await ctx.editMessageText('🙈 Perubahan diabaikan.');
@@ -247,27 +252,32 @@ bot.on('message:text', async (ctx) => {
   }
 });
 
+// FUNGSI EXECUTE COMMIT (STANDAR CONVENTIONAL COMMITS)
 function executeCommitByKey(ctx, repoKey, commitMsg) {
   const [parentDir, repoName] = repoKey.split('::');
   const repoPath = path.join(parentDir, repoName);
 
-  ensureGitignore(repoPath); // Protect secret files!
+  sanitizeAndIgnore(repoPath);
 
-  const safeMsg = commitMsg.replace(/"/g, '\\"');
+  // Default commit message format: Conventional Commit
+  const defaultMsg = `chore(auto): update project files [${new Date().toISOString().split('T')[0]}]`;
+  const finalMsg = commitMsg || defaultMsg;
+
+  const safeMsg = finalMsg.replace(/"/g, '\\"');
   const gitCommand = `git -C "${repoPath}" add . && git -C "${repoPath}" commit -m "${safeMsg}" && git -C "${repoPath}" push`;
 
   exec(gitCommand, async (error) => {
     if (error) {
       await ctx.reply(`❌ *Gagal Commit ${repoName}:*\n\`\`\`\n${error.message}\n\`\`\``, { parse_mode: 'Markdown' });
     } else {
-      await ctx.reply(`🚀 *${repoName} Berhasil di-Push!*\n💬 Msg: _"${commitMsg}"_`, { parse_mode: 'Markdown' });
+      await ctx.reply(`🚀 *${repoName} Berhasil di-Push!*\n💬 Commit: \`${finalMsg}\``, { parse_mode: 'Markdown' });
     }
     sendMainMenu(ctx, '👇 Pilih menu selanjutnya:');
   });
 }
 
 async function createNewRepo(ctx, repoName) {
-  const defaultParent = PROJECTS_DIRS[0]; // Bikin repo baru di folder utama
+  const defaultParent = PROJECTS_DIRS[0];
   const repoPath = path.join(defaultParent, repoName);
 
   if (fs.existsSync(repoPath)) {
@@ -278,7 +288,7 @@ async function createNewRepo(ctx, repoName) {
   await ctx.reply(`⏳ Bikin repo baru \`${repoName}\`...`, { parse_mode: 'Markdown' });
   fs.mkdirSync(repoPath, { recursive: true });
   fs.writeFileSync(path.join(repoPath, 'README.md'), `# ${repoName}\nCreated via Tele Bot.`);
-  ensureGitignore(repoPath);
+  sanitizeAndIgnore(repoPath);
 
   if (GITHUB_TOKEN) {
     try {
@@ -290,7 +300,7 @@ async function createNewRepo(ctx, repoName) {
       const data = await response.json();
       if (!response.ok) throw new Error(data.message);
 
-      const initCmd = `cd "${repoPath}" && git init && git add . && git commit -m "Initial commit" && git branch -M main && git remote add origin ${data.clone_url} && git push -u origin main`;
+      const initCmd = `cd "${repoPath}" && git init && git add . && git commit -m "feat: initial project setup" && git branch -M main && git remote add origin ${data.clone_url} && git push -u origin main`;
       exec(initCmd, async (err) => {
         if (err) {
           await ctx.reply(`❌ Gagal Git lokal: ${err.message}`);
@@ -308,7 +318,7 @@ async function createNewRepo(ctx, repoName) {
 
 async function publishFolderByPath(ctx, repoPath) {
   const repoName = path.basename(repoPath);
-  ensureGitignore(repoPath); // Protect secret files!
+  sanitizeAndIgnore(repoPath);
 
   await ctx.reply(`⏳ Publish folder \`${repoName}\` ke GitHub...`, { parse_mode: 'Markdown' });
   try {
@@ -320,7 +330,7 @@ async function publishFolderByPath(ctx, repoPath) {
     const data = await response.json();
     if (!response.ok) throw new Error(data.message);
 
-    const setupCmd = `cd "${repoPath}" && git init && git branch -M main && (git remote remove origin 2>/dev/null || true) && git remote add origin ${data.clone_url} && git add . && git commit -m "Initial publish via Tele Bot" && git push -u origin main`;
+    const setupCmd = `cd "${repoPath}" && git init && git branch -M main && (git remote remove origin 2>/dev/null || true) && git remote add origin ${data.clone_url} && git add . && git commit -m "feat: initial release via Tele Bot" && git push -u origin main`;
 
     exec(setupCmd, (err) => {
       if (err) {
@@ -355,9 +365,8 @@ function checkPendingGitChanges() {
       const repoPath = path.join(parentDir, repoName);
       if (!fs.existsSync(path.join(repoPath, '.git'))) return;
 
-      // Cek git status apakah ada file yang uncommitted
       exec(`git -C "${repoPath}" status --porcelain`, (err, stdout) => {
-        if (err || !stdout.trim()) return; // Gak ada perubahan
+        if (err || !stdout.trim()) return;
 
         const repoKey = `${parentDir}::${repoName}`;
         const fileList = stdout.trim();
@@ -377,5 +386,8 @@ function checkPendingGitChanges() {
     });
   });
 }
+
+// Panggil pengecekan pas startup
+checkPendingGitChanges();
 
 bot.start();
