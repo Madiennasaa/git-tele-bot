@@ -9,13 +9,11 @@ const TOKEN = process.env.TELEGRAM_TOKEN;
 const ALLOWED_CHAT_ID = process.env.MY_CHAT_ID;
 const GITHUB_TOKEN = process.env.GITHUB_TOKEN;
 
-// DAFTAR MULTIPLE FOLDER PROJEK (WSL + WINDOWS MOUNT)
 const PROJECTS_DIRS = [
   path.resolve('/home/ahmad/projects'),
   path.resolve('/mnt/d/Proyek')
 ].filter(dir => fs.existsSync(dir));
 
-// Standar .gitignore otomatis
 const DEFAULT_GITIGNORE = `
 # Environment variables
 .env
@@ -51,11 +49,10 @@ bot.catch((err) => {
   console.error(`⚠️ Network/Grammy Error:`, err.error || err.message);
 });
 
-console.log(`👀 Bot aktif (Fast Async + Smart Parser)! Memantau folder:\n${PROJECTS_DIRS.join('\n')}`);
+console.log(`👀 Bot aktif (Ultra Fast Edition)! Memantau folder:\n${PROJECTS_DIRS.join('\n')}`);
 
 const userState = {};
 
-// Helper Menu Utama
 async function sendMainMenu(ctx, text = '🤖 *Git Assistant Bot Ready!*\nPilih aksi di bawah:') {
   const keyboard = new InlineKeyboard()
     .text('➕ Bikin Repo Baru', 'action_newrepo').row()
@@ -69,18 +66,13 @@ async function sendMainMenu(ctx, text = '🤖 *Git Assistant Bot Ready!*\nPilih 
   });
 }
 
-// Helper Async .gitignore & untrack file sensitif
+// Fast Guard Ignore
 function sanitizeAndIgnoreAsync(repoPath, callback) {
   const gitignorePath = path.join(repoPath, '.gitignore');
   if (!fs.existsSync(gitignorePath)) {
     fs.writeFileSync(gitignorePath, DEFAULT_GITIGNORE.trim());
-  } else {
-    let content = fs.readFileSync(gitignorePath, 'utf8');
-    if (!content.includes('.env')) content += '\n.env\n';
-    if (!content.includes('node_modules')) content += '\nnode_modules/\n';
-    fs.writeFileSync(gitignorePath, content);
   }
-
+  // Jalankan untrack secara cepat tanpa nungguin callback kelamaan
   exec(`cd "${repoPath}" && git rm -r --cached node_modules .env dist build 2>/dev/null || true`, () => {
     if (callback) callback();
   });
@@ -216,7 +208,7 @@ bot.on('callback_query:data', async (ctx) => {
       const repoKey = decodeURIComponent(data.split(':')[1]);
       userState[ctx.from.id] = { action: 'awaiting_commit_msg', repoKey: repoKey };
       await ctx.editMessageText('✍️ *Menunggu input pesan commit khusus...*', { parse_mode: 'Markdown' }).catch(() => {});
-      await ctx.reply(`Ketik pesan commit khusus buat repo ini (contoh: \`fix: perbaiki crash saat submit\`):`);
+      await ctx.reply(`Ketik pesan commit khusus buat repo ini:`);
     }
     else if (data.startsWith('ignore')) {
       await ctx.editMessageText('🙈 Perubahan diabaikan.');
@@ -229,7 +221,7 @@ bot.on('callback_query:data', async (ctx) => {
   }
 });
 
-// 4. HANDLE CHAT BIASA (INPUT TEKS)
+// 4. HANDLE CHAT BIASA
 bot.on('message:text', async (ctx) => {
   if (ctx.chat.id.toString() !== ALLOWED_CHAT_ID.toString()) return;
 
@@ -250,76 +242,51 @@ bot.on('message:text', async (ctx) => {
   }
 });
 
-// FUNGSI EXECUTE COMMIT (SMART KEYWORD PARSER + FAST ASYNC)
+// OPTIMIZED EXECUTE COMMIT (FAST & SINGLE-PASS EXECUTION)
 function executeCommitByKey(ctx, repoKey, commitMsg) {
   const [parentDir, repoName] = repoKey.split('::');
   const repoPath = path.join(parentDir, repoName);
 
   sanitizeAndIgnoreAsync(repoPath, () => {
-    // Kalau udah ada pesan custom, langsung push
     if (commitMsg && commitMsg.trim() !== '') {
       return runGitPush(ctx, repoPath, repoName, commitMsg);
     }
 
-    // Kalau Auto Commit: Baca git diff buat analisis pintar
-    exec(`git -C "${repoPath}" diff`, (diffErr, diffOutput) => {
+    // Single Exec: Cuma panggil status porcelain biar cepet & gak berat
+    exec(`git -C "${repoPath}" status --porcelain`, (statusErr, statusOutput) => {
       let finalMsg = '';
-      const diffText = (diffOutput || '').toLowerCase();
-      let guessedIntent = '';
-      let type = 'chore';
 
-      // 1. Nebak intent berdasar kata kunci di perubahan kode
-      if (diffText.includes('catch') || diffText.includes('error') || diffText.includes('try')) {
-        type = 'fix';
-        guessedIntent = 'perbaiki penanganan error/crash';
-      } else if (diffText.includes('button') || diffText.includes('click') || diffText.includes('submit') || diffText.includes('onclick')) {
-        type = 'fix';
-        guessedIntent = 'penyesuaian handler aksi tombol atau form';
-      } else if (diffText.includes('route') || diffText.includes('api') || diffText.includes('fetch') || diffText.includes('axios')) {
-        type = 'feat';
-        guessedIntent = 'integrasi atau pembaruan alur data API';
-      } else if (diffText.includes('css') || diffText.includes('class') || diffText.includes('style') || diffText.includes('tailwind')) {
-        type = 'style';
-        guessedIntent = 'pembaruan tampilan dan gaya UI';
-      }
+      if (!statusErr && statusOutput.trim()) {
+        const lines = statusOutput.trim().split('\n').filter(Boolean);
+        const line = lines[0];
+        const rawStatus = line.substring(0, 2);
+        const filePath = line.trim().replace(/^[\?\sA-Z]+\s+/, '');
+        const fileName = path.basename(filePath);
 
-      if (guessedIntent) {
-        finalMsg = `${type}: ${guessedIntent}`;
-        runGitPush(ctx, repoPath, repoName, finalMsg);
+        let type = 'fix';
+        let actionText = 'update';
+
+        if (rawStatus.includes('A') || rawStatus.includes('?')) {
+          type = 'feat';
+          actionText = 'add';
+        } else if (rawStatus.includes('D')) {
+          type = 'refactor';
+          actionText = 'remove';
+        } else if (rawStatus.includes('M')) {
+          type = 'fix';
+          actionText = 'update';
+        }
+
+        finalMsg = `${type}(${repoName.toLowerCase()}): ${actionText} ${fileName}`;
       } else {
-        // 2. Fallback kalau gak nemu kata kunci: Pake nama file bersih
-        exec(`git -C "${repoPath}" status --porcelain`, (statusErr, statusOutput) => {
-          if (!statusErr && statusOutput.trim()) {
-            const lines = statusOutput.trim().split('\n').filter(Boolean);
-            const line = lines[0];
-            const rawStatus = line.substring(0, 2);
-            const filePath = line.trim().replace(/^[\?\sA-Z]+\s+/, '');
-            const fileName = path.basename(filePath);
-
-            let actionText = 'perbaikan pada';
-            if (rawStatus.includes('A') || rawStatus.includes('?')) {
-              type = 'feat';
-              actionText = 'penambahan file';
-            } else if (rawStatus.includes('D')) {
-              type = 'refactor';
-              actionText = 'penghapusan file';
-            } else if (rawStatus.includes('M')) {
-              type = 'fix';
-              actionText = 'pembaruan pada';
-            }
-
-            finalMsg = `${type}(${repoName.toLowerCase()}): ${actionText} ${fileName}`;
-          } else {
-            finalMsg = `chore(${repoName.toLowerCase()}): update project files`;
-          }
-          runGitPush(ctx, repoPath, repoName, finalMsg);
-        });
+        finalMsg = `chore(${repoName.toLowerCase()}): update project files`;
       }
+
+      runGitPush(ctx, repoPath, repoName, finalMsg);
     });
   });
 }
 
-// Helper Push Async
 function runGitPush(ctx, repoPath, repoName, finalMsg) {
   const safeMsg = finalMsg.replace(/"/g, '\\"');
   const gitCommand = `cd "${repoPath}" && git add . && git commit -m "${safeMsg}" && git push`;
@@ -415,7 +382,6 @@ async function publishFolderByPath(ctx, repoPath) {
   });
 }
 
-// FUNGSI CEK SISA PERUBAHAN PAS BOT BARU NYALA
 function checkPendingGitChanges() {
   PROJECTS_DIRS.forEach(parentDir => {
     if (!fs.existsSync(parentDir)) return;
@@ -448,7 +414,6 @@ function checkPendingGitChanges() {
   });
 }
 
-// Panggil pengecekan pas startup
 checkPendingGitChanges();
 
 bot.start();
