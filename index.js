@@ -1,7 +1,7 @@
 require('dotenv').config();
 const { Bot, InlineKeyboard } = require('grammy');
 const chokidar = require('chokidar');
-const { exec } = require('child_process');
+const { exec, execSync } = require('child_process');
 const path = require('path');
 const fs = require('fs');
 
@@ -69,7 +69,7 @@ async function sendMainMenu(ctx, text = '🤖 *Git Assistant Bot Ready!*\nPilih 
   });
 }
 
-// Helper mastiin .gitignore & bersihin index git dari file sensitif yang terlanjur ke-commit
+// Helper mastiin .gitignore & bersihin index git dari file sensitif secara SINKRON (execSync)
 function sanitizeAndIgnore(repoPath) {
   const gitignorePath = path.join(repoPath, '.gitignore');
   if (!fs.existsSync(gitignorePath)) {
@@ -81,12 +81,11 @@ function sanitizeAndIgnore(repoPath) {
     fs.writeFileSync(gitignorePath, content);
   }
 
-  // Untrack file sensitif dari cache Git biar hilang dari remote/GitHub (file lokal tetep ada)
-  const untrackCmd = `cd "${repoPath}" && git rm -r --cached node_modules .env dist build 2>/dev/null || true`;
+  // Untrack file sensitif secara sinkron biar beneran hilang dari remote GitHub
   try {
-    exec(untrackCmd);
+    execSync(`git -C "${repoPath}" rm -r --cached node_modules .env dist build 2>/dev/null || true`);
   } catch (e) {
-    // ignore error kalau file emang belum pernah di-track
+    // Ignore error kalau file emang belum pernah ter-track
   }
 }
 
@@ -213,7 +212,7 @@ bot.on('callback_query:data', async (ctx) => {
     }
     else if (data.startsWith('commit_auto:')) {
       const repoKey = decodeURIComponent(data.split(':')[1]);
-      executeCommitByKey(ctx, repoKey, null); // null biar pake default Conventional Commit
+      executeCommitByKey(ctx, repoKey, null); // Send null biar pake Conventional Commit!
     }
     else if (data.startsWith('commit_custom:')) {
       const repoKey = decodeURIComponent(data.split(':')[1]);
@@ -257,11 +256,13 @@ function executeCommitByKey(ctx, repoKey, commitMsg) {
   const [parentDir, repoName] = repoKey.split('::');
   const repoPath = path.join(parentDir, repoName);
 
+  // Sanitasi file sensitif & gitignore secara sinkron
   sanitizeAndIgnore(repoPath);
 
-  // Default commit message format: Conventional Commit
-  const defaultMsg = `chore(auto): update project files [${new Date().toISOString().split('T')[0]}]`;
-  const finalMsg = commitMsg || defaultMsg;
+  // Standar Conventional Commit untuk Auto Commit
+  const dateStr = new Date().toISOString().split('T')[0];
+  const defaultMsg = `chore(auto): update project files [${dateStr}]`;
+  const finalMsg = (commitMsg && commitMsg.trim() !== '') ? commitMsg : defaultMsg;
 
   const safeMsg = finalMsg.replace(/"/g, '\\"');
   const gitCommand = `git -C "${repoPath}" add . && git -C "${repoPath}" commit -m "${safeMsg}" && git -C "${repoPath}" push`;
