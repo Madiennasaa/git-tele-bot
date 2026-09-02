@@ -9,6 +9,7 @@ const TOKEN = process.env.TELEGRAM_TOKEN;
 const ALLOWED_CHAT_ID = process.env.MY_CHAT_ID;
 const GITHUB_TOKEN = process.env.GITHUB_TOKEN;
 
+// DAFTAR MULTIPLE FOLDER PROJEK
 const PROJECTS_DIRS = [
   path.resolve('/home/ahmad/projects'),
   path.resolve('/mnt/d/Proyek')
@@ -49,7 +50,7 @@ bot.catch((err) => {
   console.error(`⚠️ Network/Grammy Error:`, err.error || err.message);
 });
 
-console.log(`👀 Bot aktif (Ultra Fast Edition)! Memantau folder:\n${PROJECTS_DIRS.join('\n')}`);
+console.log(`👀 Bot aktif (Fast Descriptive Engine)! Memantau folder:\n${PROJECTS_DIRS.join('\n')}`);
 
 const userState = {};
 
@@ -66,13 +67,11 @@ async function sendMainMenu(ctx, text = '🤖 *Git Assistant Bot Ready!*\nPilih 
   });
 }
 
-// Fast Guard Ignore
 function sanitizeAndIgnoreAsync(repoPath, callback) {
   const gitignorePath = path.join(repoPath, '.gitignore');
   if (!fs.existsSync(gitignorePath)) {
     fs.writeFileSync(gitignorePath, DEFAULT_GITIGNORE.trim());
   }
-  // Jalankan untrack secara cepat tanpa nungguin callback kelamaan
   exec(`cd "${repoPath}" && git rm -r --cached node_modules .env dist build 2>/dev/null || true`, () => {
     if (callback) callback();
   });
@@ -201,7 +200,7 @@ bot.on('callback_query:data', async (ctx) => {
     }
     else if (data.startsWith('commit_auto:')) {
       const repoKey = decodeURIComponent(data.split(':')[1]);
-      await ctx.editMessageText('🔄 *Menganalisis kode & memproses Push...*', { parse_mode: 'Markdown' }).catch(() => {});
+      await ctx.editMessageText('🔄 *Menganalisis diff & memproses Push...*', { parse_mode: 'Markdown' }).catch(() => {});
       executeCommitByKey(ctx, repoKey, null);
     }
     else if (data.startsWith('commit_custom:')) {
@@ -242,7 +241,7 @@ bot.on('message:text', async (ctx) => {
   }
 });
 
-// OPTIMIZED EXECUTE COMMIT (FAST & SINGLE-PASS EXECUTION)
+// DESCRIPTIVE ENGLISH COMMIT ENGINE
 function executeCommitByKey(ctx, repoKey, commitMsg) {
   const [parentDir, repoName] = repoKey.split('::');
   const repoPath = path.join(parentDir, repoName);
@@ -252,37 +251,57 @@ function executeCommitByKey(ctx, repoKey, commitMsg) {
       return runGitPush(ctx, repoPath, repoName, commitMsg);
     }
 
-    // Single Exec: Cuma panggil status porcelain biar cepet & gak berat
-    exec(`git -C "${repoPath}" status --porcelain`, (statusErr, statusOutput) => {
+    // Ambil diff ringkas (maksimal 50 baris pertama biar tetep wus-wus!)
+    exec(`git -C "${repoPath}" diff -U0 | head -n 50`, (diffErr, diffOutput) => {
       let finalMsg = '';
+      const diffText = (diffOutput || '').toLowerCase();
 
-      if (!statusErr && statusOutput.trim()) {
-        const lines = statusOutput.trim().split('\n').filter(Boolean);
-        const line = lines[0];
-        const rawStatus = line.substring(0, 2);
-        const filePath = line.trim().replace(/^[\?\sA-Z]+\s+/, '');
-        const fileName = path.basename(filePath);
-
-        let type = 'fix';
-        let actionText = 'update';
-
-        if (rawStatus.includes('A') || rawStatus.includes('?')) {
-          type = 'feat';
-          actionText = 'add';
-        } else if (rawStatus.includes('D')) {
-          type = 'refactor';
-          actionText = 'remove';
-        } else if (rawStatus.includes('M')) {
-          type = 'fix';
-          actionText = 'update';
-        }
-
-        finalMsg = `${type}(${repoName.toLowerCase()}): ${actionText} ${fileName}`;
-      } else {
-        finalMsg = `chore(${repoName.toLowerCase()}): update project files`;
+      // Smart Action Pattern Matcher (English)
+      if (diffText.includes('prevent') || diffText.includes('disabled') || diffText.includes('once') || diffText.includes('debounce')) {
+        finalMsg = 'fix: prevent duplicate submit action and crash issues';
+      } else if (diffText.includes('catch') || diffText.includes('error') || diffText.includes('try')) {
+        finalMsg = 'fix: handle unexpected exception and error crash flow';
+      } else if (diffText.includes('button') || diffText.includes('click') || diffText.includes('submit') || diffText.includes('onclick')) {
+        finalMsg = 'fix: update button click and form submission handler';
+      } else if (diffText.includes('route') || diffText.includes('api') || diffText.includes('fetch') || diffText.includes('axios')) {
+        finalMsg = 'feat: refactor API integration and data fetching logic';
+      } else if (diffText.includes('css') || diffText.includes('class') || diffText.includes('style') || diffText.includes('tailwind')) {
+        finalMsg = 'style: refine UI components layout and styling';
       }
 
-      runGitPush(ctx, repoPath, repoName, finalMsg);
+      // Fallback kalau nggak nemu kata kunci spesifik
+      if (!finalMsg) {
+        exec(`git -C "${repoPath}" status --porcelain`, (statusErr, statusOutput) => {
+          if (!statusErr && statusOutput.trim()) {
+            const lines = statusOutput.trim().split('\n').filter(Boolean);
+            const line = lines[0];
+            const rawStatus = line.substring(0, 2);
+            const filePath = line.trim().replace(/^[\?\sA-Z]+\s+/, '');
+            const fileName = path.basename(filePath);
+
+            let type = 'fix';
+            let actionText = 'update';
+
+            if (rawStatus.includes('A') || rawStatus.includes('?')) {
+              type = 'feat';
+              actionText = 'add';
+            } else if (rawStatus.includes('D')) {
+              type = 'refactor';
+              actionText = 'remove';
+            } else if (rawStatus.includes('M')) {
+              type = 'fix';
+              actionText = 'update';
+            }
+
+            finalMsg = `${type}(${repoName.toLowerCase()}): ${actionText} ${fileName}`;
+          } else {
+            finalMsg = `chore(${repoName.toLowerCase()}): update project files`;
+          }
+          runGitPush(ctx, repoPath, repoName, finalMsg);
+        });
+      } else {
+        runGitPush(ctx, repoPath, repoName, finalMsg);
+      }
     });
   });
 }
