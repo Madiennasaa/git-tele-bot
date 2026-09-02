@@ -8,7 +8,38 @@ const fs = require('fs');
 const TOKEN = process.env.TELEGRAM_TOKEN;
 const ALLOWED_CHAT_ID = process.env.MY_CHAT_ID;
 const GITHUB_TOKEN = process.env.GITHUB_TOKEN;
-const PROJECTS_DIR = path.resolve('/home/ahmad/projects');
+
+// DAFTAR MULTIPLE FOLDER PROJEK (WSL + WINDOWS MOUNT)
+// Kalo di WSL, akses D: Windows pake /mnt/d/
+const PROJECTS_DIRS = [
+  path.resolve('/home/ahmad/projects'),
+  path.resolve('/mnt/d/Proyek') // Sesuaikan kalo kamu pake WSL akses drive D Windows
+].filter(dir => fs.existsSync(dir)); // Cuma ambil folder yang beneran ada
+
+// Isi standar .gitignore otomatis biar aman!
+const DEFAULT_GITIGNORE = `
+# Environment variables
+.env
+.env.local
+.env.*.local
+
+# Dependencies
+node_modules/
+/vendor/
+
+# Build & Output
+dist/
+build/
+*.exe
+*.o
+*.so
+
+# System & IDE files
+.DS_Store
+Thumbs.db
+.vscode/
+.idea/
+`;
 
 if (!TOKEN || !ALLOWED_CHAT_ID) {
   console.error('❌ Error: TELEGRAM_TOKEN atau MY_CHAT_ID belum diisi di .env!');
@@ -17,18 +48,31 @@ if (!TOKEN || !ALLOWED_CHAT_ID) {
 
 const bot = new Bot(TOKEN);
 
-// ERROR HANDLER: Biar bot gak crash pas internet RTO/timeout
 bot.catch((err) => {
   console.error(`⚠️ Network/Grammy Error:`, err.error || err.message);
 });
 
-console.log(`👀 Bot interaktif aktif! Memantau folder: ${PROJECTS_DIR}`);
+console.log(`👀 Bot aktif! Memantau folder:\n${PROJECTS_DIRS.join('\n')}`);
 
 const userState = {};
 
-// 1. WATCHER MULTI-REPO
-const watcher = chokidar.watch(PROJECTS_DIR, {
-  ignored: [/(^|[\/\\])\../, '**/node_modules/**', '**/dist/**', '**/build/**'],
+// Helper buat Menu Utama
+async function sendMainMenu(ctx, text = '🤖 *Git Assistant Bot Ready!*\nPilih aksi di bawah:') {
+  const keyboard = new InlineKeyboard()
+    .text('➕ Bikin Repo Baru', 'action_newrepo').row()
+    .text('📤 Publish Folder Lokal', 'action_publishrepo').row()
+    .text('🐙 List Repo GitHub Saya', 'action_listgithub').row()
+    .text('📁 List Folder Lokal', 'action_listrepos');
+
+  await ctx.reply(text, {
+    parse_mode: 'Markdown',
+    reply_markup: keyboard
+  });
+}
+
+// 1. WATCHER MULTI-PATH
+const watcher = chokidar.watch(PROJECTS_DIRS, {
+  ignored: [/(^|[\/\\])\../, '**/node_modules/**', '**/vendor/**', '**/dist/**', '**/build/**'],
   persistent: true,
   ignoreInitial: true
 });
@@ -37,31 +81,37 @@ let debounceTimer = null;
 let changedFilesByRepo = {};
 
 watcher.on('all', (event, filePath) => {
-  const relative = path.relative(PROJECTS_DIR, filePath);
+  // Cari folder projek parent dari file yang berubah
+  let targetParent = PROJECTS_DIRS.find(d => filePath.startsWith(d));
+  if (!targetParent) return;
+
+  const relative = path.relative(targetParent, filePath);
   const repoName = relative.split(path.sep)[0];
-  const repoPath = path.join(PROJECTS_DIR, repoName);
+  const repoPath = path.join(targetParent, repoName);
 
   if (!fs.existsSync(path.join(repoPath, '.git'))) return;
 
-  if (!changedFilesByRepo[repoName]) changedFilesByRepo[repoName] = new Set();
+  const repoKey = `${targetParent}::${repoName}`;
+  if (!changedFilesByRepo[repoKey]) changedFilesByRepo[repoKey] = new Set();
 
   const fileRelative = path.relative(repoPath, filePath);
-  changedFilesByRepo[repoName].add(`${event.toUpperCase()}: ${fileRelative}`);
+  changedFilesByRepo[repoKey].add(`${event.toUpperCase()}: ${fileRelative}`);
 
   clearTimeout(debounceTimer);
   debounceTimer = setTimeout(() => sendMultiRepoNotification(), 5000);
 });
 
 function sendMultiRepoNotification() {
-  for (const [repoName, files] of Object.entries(changedFilesByRepo)) {
+  for (const [repoKey, files] of Object.entries(changedFilesByRepo)) {
     if (files.size === 0) continue;
 
+    const [parentDir, repoName] = repoKey.split('::');
     const fileList = Array.from(files).join('\n');
-    const message = `📦 *Repo:* \`${repoName}\`\n⚠️ *Perubahan Terdeteksi!*\n\n\`\`\`\n${fileList}\n\`\`\`\nPilih aksi yang mau kamu lakukan:`;
+    const message = `📦 *Repo:* \`${repoName}\`\n📍 *Loc:* \`${parentDir}\`\n⚠️ *Perubahan Terdeteksi!*\n\n\`\`\`\n${fileList}\n\`\`\`\nPilih aksi yang mau kamu lakukan:`;
 
     const keyboard = new InlineKeyboard()
-      .text('✅ Auto Commit', `commit_auto:${repoName}`).row()
-      .text('✏️ Custom Commit Msg', `commit_custom:${repoName}`).row()
+      .text('✅ Auto Commit', `commit_auto:${encodeURIComponent(repoKey)}`).row()
+      .text('✏️ Custom Commit Msg', `commit_custom:${encodeURIComponent(repoKey)}`).row()
       .text('❌ Abaikan', 'ignore');
 
     bot.api.sendMessage(ALLOWED_CHAT_ID, message, {
@@ -72,20 +122,23 @@ function sendMultiRepoNotification() {
   changedFilesByRepo = {};
 }
 
-// 2. TAMPILAN DASHBOARD /START
+// Helper buat mastiin .gitignore aman sebelum commit
+function ensureGitignore(repoPath) {
+  const gitignorePath = path.join(repoPath, '.gitignore');
+  if (!fs.existsSync(gitignorePath)) {
+    fs.writeFileSync(gitignorePath, DEFAULT_GITIGNORE.trim());
+  } else {
+    let content = fs.readFileSync(gitignorePath, 'utf8');
+    if (!content.includes('.env')) content += '\n.env\n';
+    if (!content.includes('node_modules')) content += '\nnode_modules/\n';
+    fs.writeFileSync(gitignorePath, content);
+  }
+}
+
+// 2. /START COMMAND
 bot.command('start', async (ctx) => {
   if (ctx.chat.id.toString() !== ALLOWED_CHAT_ID.toString()) return;
-
-  const keyboard = new InlineKeyboard()
-    .text('➕ Bikin Repo Baru', 'action_newrepo').row()
-    .text('📤 Publish Folder Lokal', 'action_publishrepo').row()
-    .text('🐙 List Repo GitHub Saya', 'action_listgithub').row()
-    .text('📁 List Folder Lokal', 'action_listrepos');
-
-  await ctx.reply('🤖 *Git Assistant Bot Ready!*\nPilih aksi langsung dari tombol di bawah:', {
-    parse_mode: 'Markdown',
-    reply_markup: keyboard
-  });
+  await sendMainMenu(ctx);
 });
 
 // 3. HANDLE CALLBACK QUERY (PENCET TOMBOL)
@@ -97,44 +150,74 @@ bot.on('callback_query:data', async (ctx) => {
   try {
     if (data === 'action_newrepo') {
       userState[ctx.from.id] = { action: 'awaiting_newrepo_name' };
-      await ctx.reply('✍️ Ketik **nama repo baru** yang mau kamu buat (lokal + GitHub):');
+      await ctx.reply('✍️ Ketik **nama repo baru** yang mau dibuat (di WSL `/home/ahmad/projects/`):');
     }
     else if (data === 'action_publishrepo') {
-      userState[ctx.from.id] = { action: 'awaiting_publish_name' };
-      await ctx.reply('✍️ Ketik **nama folder lokal** di `/projects/` yang mau di-publish ke GitHub:');
+      // AMBIL SEMUA FOLDER DARI DAFTAR PROJECTS_DIRS TERUS TAMPILIN JADI TOMBOL!
+      const keyboard = new InlineKeyboard();
+      let totalFolder = 0;
+
+      PROJECTS_DIRS.forEach(parentDir => {
+        const folders = fs.readdirSync(parentDir).filter(f => fs.statSync(path.join(parentDir, f)).isDirectory());
+        folders.forEach(f => {
+          const fullPath = path.join(parentDir, f);
+          keyboard.text(`📁 ${f} (${path.basename(parentDir)})`, `do_publish:${encodeURIComponent(fullPath)}`).row();
+          totalFolder++;
+        });
+      });
+
+      if (totalFolder === 0) {
+        await ctx.reply('❌ Nggak ada folder projek ditemukan di path lokal kamu.');
+        return sendMainMenu(ctx);
+      }
+
+      await ctx.reply('👇 *Pilih folder lokal yang mau kamu publish ke GitHub:*', {
+        parse_mode: 'Markdown',
+        reply_markup: keyboard
+      });
+    }
+    else if (data.startsWith('do_publish:')) {
+      const fullPath = decodeURIComponent(data.split(':')[1]);
+      publishFolderByPath(ctx, fullPath);
     }
     else if (data === 'action_listgithub') {
       if (!GITHUB_TOKEN) return ctx.reply('❌ `GITHUB_TOKEN` belum diisi di `.env`!');
       await ctx.reply('⏳ Mengambil daftar repo dari GitHub API...');
 
       const res = await fetch('https://api.github.com/user/repos?per_page=100&sort=updated', {
-        headers: {
-          'Authorization': `token ${GITHUB_TOKEN}`,
-          'User-Agent': 'Node-Bot'
-        }
+        headers: { 'Authorization': `token ${GITHUB_TOKEN}`, 'User-Agent': 'Node-Bot' }
       });
       const repos = await res.json();
 
-      if (!res.ok) return ctx.reply(`❌ Error API: ${repos.message}`);
-
-      const listStr = repos.map((r, i) => `${i + 1}. [${r.name}](${r.html_url}) ${r.private ? '🔒' : '🌐'}`).join('\n');
-      await ctx.reply(`🐙 *Daftar Repo GitHub Kamu (${repos.length}):*\n\n${listStr}`, { parse_mode: 'Markdown', disable_web_page_preview: true });
+      if (!res.ok) {
+        await ctx.reply(`❌ Error API: ${repos.message}`);
+      } else {
+        const listStr = repos.map((r, i) => `${i + 1}. [${r.name}](${r.html_url}) ${r.private ? '🔒' : '🌐'}`).join('\n');
+        await ctx.reply(`🐙 *Daftar Repo GitHub Kamu (${repos.length}):*\n\n${listStr}`, { parse_mode: 'Markdown', disable_web_page_preview: true });
+      }
+      await sendMainMenu(ctx, '👇 Pilih menu selanjutnya:');
     }
     else if (data === 'action_listrepos') {
-      const folders = fs.readdirSync(PROJECTS_DIR).filter(f => fs.statSync(path.join(PROJECTS_DIR, f)).isDirectory());
-      await ctx.reply(`📂 *Folder Lokal di Projects:*\n\n${folders.map(f => `• \`${f}\``).join('\n')}`, { parse_mode: 'Markdown' });
+      let listText = '📂 *Daftar Folder Lokal:*\n\n';
+      PROJECTS_DIRS.forEach(parentDir => {
+        const folders = fs.readdirSync(parentDir).filter(f => fs.statSync(path.join(parentDir, f)).isDirectory());
+        listText += `📍 *${parentDir}*\n${folders.map(f => `  • \`${f}\``).join('\n')}\n\n`;
+      });
+      await ctx.reply(listText, { parse_mode: 'Markdown' });
+      await sendMainMenu(ctx, '👇 Pilih menu selanjutnya:');
     }
     else if (data.startsWith('commit_auto:')) {
-      const repoName = data.split(':')[1];
-      executeCommit(ctx, repoName, `Auto-commit via Tele Bot [${new Date().toLocaleTimeString()}]`);
+      const repoKey = decodeURIComponent(data.split(':')[1]);
+      executeCommitByKey(ctx, repoKey, `Auto-commit via Tele Bot [${new Date().toLocaleTimeString()}]`);
     }
     else if (data.startsWith('commit_custom:')) {
-      const repoName = data.split(':')[1];
-      userState[ctx.from.id] = { action: 'awaiting_commit_msg', repoName: repoName };
-      await ctx.reply(`✍️ Ketik pesan commit khusus buat repo \`${repoName}\`:`, { parse_mode: 'Markdown' });
+      const repoKey = decodeURIComponent(data.split(':')[1]);
+      userState[ctx.from.id] = { action: 'awaiting_commit_msg', repoKey: repoKey };
+      await ctx.reply(`✍️ Ketik pesan commit khusus:`, { parse_mode: 'Markdown' });
     }
     else if (data === 'ignore') {
       await ctx.editMessageText('🙈 Perubahan diabaikan.');
+      await sendMainMenu(ctx, '👇 Pilih menu selanjutnya:');
     }
 
     await ctx.answerCallbackQuery().catch(() => {});
@@ -153,41 +236,49 @@ bot.on('message:text', async (ctx) => {
   const textInput = ctx.message.text.trim();
 
   if (state.action === 'awaiting_commit_msg') {
-    const repoName = state.repoName;
+    const repoKey = state.repoKey;
     delete userState[ctx.from.id];
-    await ctx.reply(`🔄 Memproses commit dengan pesan: *"${textInput}"*...`, { parse_mode: 'Markdown' });
-    executeCommit(ctx, repoName, textInput);
+    await ctx.reply(`🔄 Memproses commit: *"${textInput}"*...`, { parse_mode: 'Markdown' });
+    executeCommitByKey(ctx, repoKey, textInput);
   }
   else if (state.action === 'awaiting_newrepo_name') {
     delete userState[ctx.from.id];
     createNewRepo(ctx, textInput);
   }
-  else if (state.action === 'awaiting_publish_name') {
-    delete userState[ctx.from.id];
-    publishExistingFolder(ctx, textInput);
-  }
 });
 
-function executeCommit(ctx, repoName, commitMsg) {
-  const repoPath = path.join(PROJECTS_DIR, repoName);
+function executeCommitByKey(ctx, repoKey, commitMsg) {
+  const [parentDir, repoName] = repoKey.split('::');
+  const repoPath = path.join(parentDir, repoName);
+
+  ensureGitignore(repoPath); // Protect secret files!
+
   const safeMsg = commitMsg.replace(/"/g, '\\"');
   const gitCommand = `git -C "${repoPath}" add . && git -C "${repoPath}" commit -m "${safeMsg}" && git -C "${repoPath}" push`;
 
-  exec(gitCommand, (error, stdout) => {
+  exec(gitCommand, async (error) => {
     if (error) {
-      return ctx.reply(`❌ *Gagal Commit ${repoName}:*\n\`\`\`\n${error.message}\n\`\`\``, { parse_mode: 'Markdown' });
+      await ctx.reply(`❌ *Gagal Commit ${repoName}:*\n\`\`\`\n${error.message}\n\`\`\``, { parse_mode: 'Markdown' });
+    } else {
+      await ctx.reply(`🚀 *${repoName} Berhasil di-Push!*\n💬 Msg: _"${commitMsg}"_`, { parse_mode: 'Markdown' });
     }
-    ctx.reply(`🚀 *${repoName} Berhasil di-Push!*\n💬 Msg: _"${commitMsg}"_`, { parse_mode: 'Markdown' });
+    sendMainMenu(ctx, '👇 Pilih menu selanjutnya:');
   });
 }
 
 async function createNewRepo(ctx, repoName) {
-  const repoPath = path.join(PROJECTS_DIR, repoName);
-  if (fs.existsSync(repoPath)) return ctx.reply(`⚠️ Folder \`${repoName}\` udah ada!`, { parse_mode: 'Markdown' });
+  const defaultParent = PROJECTS_DIRS[0]; // Bikin repo baru di folder utama
+  const repoPath = path.join(defaultParent, repoName);
+
+  if (fs.existsSync(repoPath)) {
+    await ctx.reply(`⚠️ Folder \`${repoName}\` udah ada!`, { parse_mode: 'Markdown' });
+    return sendMainMenu(ctx);
+  }
 
   await ctx.reply(`⏳ Bikin repo baru \`${repoName}\`...`, { parse_mode: 'Markdown' });
   fs.mkdirSync(repoPath, { recursive: true });
   fs.writeFileSync(path.join(repoPath, 'README.md'), `# ${repoName}\nCreated via Tele Bot.`);
+  ensureGitignore(repoPath);
 
   if (GITHUB_TOKEN) {
     try {
@@ -200,19 +291,24 @@ async function createNewRepo(ctx, repoName) {
       if (!response.ok) throw new Error(data.message);
 
       const initCmd = `cd "${repoPath}" && git init && git add . && git commit -m "Initial commit" && git branch -M main && git remote add origin ${data.clone_url} && git push -u origin main`;
-      exec(initCmd, (err) => {
-        if (err) return ctx.reply(`❌ Gagal Git lokal: ${err.message}`);
-        ctx.reply(`🚀 *Repo Berhasil Dibuat!*\nGitHub: ${data.html_url}`, { parse_mode: 'Markdown' });
+      exec(initCmd, async (err) => {
+        if (err) {
+          await ctx.reply(`❌ Gagal Git lokal: ${err.message}`);
+        } else {
+          await ctx.reply(`🚀 *Repo Berhasil Dibuat!*\nGitHub: ${data.html_url}`, { parse_mode: 'Markdown' });
+        }
+        sendMainMenu(ctx, '👇 Pilih menu selanjutnya:');
       });
-    } catch (err) { ctx.reply(`❌ Error: ${err.message}`); }
-  } else {
-    exec(`cd "${repoPath}" && git init`, () => ctx.reply(`✅ Repo lokal \`${repoName}\` dibuat.`, { parse_mode: 'Markdown' }));
+    } catch (err) {
+      await ctx.reply(`❌ Error: ${err.message}`);
+      sendMainMenu(ctx);
+    }
   }
 }
 
-async function publishExistingFolder(ctx, repoName) {
-  const repoPath = path.join(PROJECTS_DIR, repoName);
-  if (!fs.existsSync(repoPath)) return ctx.reply(`❌ Folder \`${repoName}\` gak ketemu!`, { parse_mode: 'Markdown' });
+async function publishFolderByPath(ctx, repoPath) {
+  const repoName = path.basename(repoPath);
+  ensureGitignore(repoPath); // Protect secret files!
 
   await ctx.reply(`⏳ Publish folder \`${repoName}\` ke GitHub...`, { parse_mode: 'Markdown' });
   try {
@@ -224,20 +320,62 @@ async function publishExistingFolder(ctx, repoName) {
     const data = await response.json();
     if (!response.ok) throw new Error(data.message);
 
-    const setupCmd = `cd "${repoPath}" && git init && git branch -M main && (git remote remove origin 2>/dev/null || true) && git remote add origin ${data.clone_url} && git add . && git commit -m "Initial publish" && git push -u origin main`;
+    const setupCmd = `cd "${repoPath}" && git init && git branch -M main && (git remote remove origin 2>/dev/null || true) && git remote add origin ${data.clone_url} && git add . && git commit -m "Initial publish via Tele Bot" && git push -u origin main`;
 
     exec(setupCmd, (err) => {
       if (err) {
         const fallbackCmd = `cd "${repoPath}" && git branch -M main && (git remote remove origin 2>/dev/null || true) && git remote add origin ${data.clone_url} && git push -u origin main`;
-        exec(fallbackCmd, (fbErr) => {
-          if (fbErr) return ctx.reply(`❌ Push Gagal: ${fbErr.message}`);
-          ctx.reply(`🚀 *Folder ${repoName} Published!*\nGitHub: ${data.html_url}`, { parse_mode: 'Markdown' });
+        exec(fallbackCmd, async (fbErr) => {
+          if (fbErr) {
+            await ctx.reply(`❌ Push Gagal: ${fbErr.message}`);
+          } else {
+            await ctx.reply(`🚀 *Folder ${repoName} Published!*\nGitHub: ${data.html_url}`, { parse_mode: 'Markdown' });
+          }
+          sendMainMenu(ctx, '👇 Pilih menu selanjutnya:');
         });
         return;
       }
       ctx.reply(`🚀 *Folder ${repoName} Published!*\nGitHub: ${data.html_url}`, { parse_mode: 'Markdown' });
+      sendMainMenu(ctx, '👇 Pilih menu selanjutnya:');
     });
-  } catch (err) { ctx.reply(`❌ Error: ${err.message}`); }
+  } catch (err) {
+    await ctx.reply(`❌ Error: ${err.message}`);
+    sendMainMenu(ctx);
+  }
+}
+
+// FUNGSI CEK SISA PERUBAHAN PAS BOT BARU NYALA
+function checkPendingGitChanges() {
+  PROJECTS_DIRS.forEach(parentDir => {
+    if (!fs.existsSync(parentDir)) return;
+
+    const folders = fs.readdirSync(parentDir).filter(f => fs.statSync(path.join(parentDir, f)).isDirectory());
+
+    folders.forEach(repoName => {
+      const repoPath = path.join(parentDir, repoName);
+      if (!fs.existsSync(path.join(repoPath, '.git'))) return;
+
+      // Cek git status apakah ada file yang uncommitted
+      exec(`git -C "${repoPath}" status --porcelain`, (err, stdout) => {
+        if (err || !stdout.trim()) return; // Gak ada perubahan
+
+        const repoKey = `${parentDir}::${repoName}`;
+        const fileList = stdout.trim();
+
+        const message = `📦 *Repo:* \`${repoName}\`\n📍 *Loc:* \`${parentDir}\`\n⚠️ *Perubahan Ditemukan Pas Bot Startup!*\n\n\`\`\`\n${fileList}\n\`\`\`\nPilih aksi:`;
+
+        const keyboard = new InlineKeyboard()
+          .text('✅ Auto Commit', `commit_auto:${encodeURIComponent(repoKey)}`).row()
+          .text('✏️ Custom Commit Msg', `commit_custom:${encodeURIComponent(repoKey)}`).row()
+          .text('❌ Abaikan', 'ignore');
+
+        bot.api.sendMessage(ALLOWED_CHAT_ID, message, {
+          parse_mode: 'Markdown',
+          reply_markup: keyboard
+        }).catch(() => {});
+      });
+    });
+  });
 }
 
 bot.start();

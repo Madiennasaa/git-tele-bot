@@ -1,0 +1,21 @@
+# Environment variables
+.env
+.env.local
+.env.*.local
+
+# Dependencies
+node_modules/
+/vendor/
+
+# Build & Output
+dist/
+build/
+*.exe
+*.o
+*.so
+
+# System & IDE files
+.DS_Store
+Thumbs.db
+.vscode/
+.idea/
