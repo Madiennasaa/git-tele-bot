@@ -205,7 +205,7 @@ bot.on('callback_query:data', async (ctx) => {
     }
     else if (data.startsWith('commit_auto:')) {
       const repoKey = decodeURIComponent(data.split(':')[1]);
-      await ctx.editMessageText('🧠 *Gemini AI sedang menganalisis kodedu & meracik commit...*', { parse_mode: 'Markdown' }).catch(() => {});
+      await ctx.editMessageText('🧠 *Gemini AI sedang menganalisis kode & meracik commit...*', { parse_mode: 'Markdown' }).catch(() => {});
       executeCommitByKey(ctx, repoKey, null);
     }
     else if (data.startsWith('commit_custom:')) {
@@ -273,7 +273,7 @@ ${diffText.substring(0, 3000)}`;
   }
 }
 
-// EXECUTE COMMIT WITH GEMINI FALLBACK
+// EXECUTE COMMIT WITH UNTRACKED FILE FIX
 function executeCommitByKey(ctx, repoKey, commitMsg) {
   const [parentDir, repoName] = repoKey.split('::');
   const repoPath = path.join(parentDir, repoName);
@@ -283,15 +283,15 @@ function executeCommitByKey(ctx, repoKey, commitMsg) {
       return runGitPush(ctx, repoPath, repoName, commitMsg);
     }
 
-    // Ambil diff buat diisi ke Gemini AI
-    exec(`git -C "${repoPath}" diff`, async (diffErr, diffOutput) => {
+    // Stage sementara dulu (git add .) biar file baru (??) ke-detect sama git diff!
+    exec(`cd "${repoPath}" && git add -N . && git diff`, async (diffErr, diffOutput) => {
       let finalMsg = '';
 
       if (diffOutput && diffOutput.trim()) {
         finalMsg = await generateGeminiCommitMsg(diffOutput);
       }
 
-      // Fallback kalau API Error atau diff kosong
+      // Fallback kalau Gemini API gagal/kosong
       if (!finalMsg) {
         exec(`git -C "${repoPath}" status --porcelain`, (statusErr, statusOutput) => {
           if (!statusErr && statusOutput.trim()) {
