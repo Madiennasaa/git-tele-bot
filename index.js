@@ -49,6 +49,9 @@ const mainMenu = new Keyboard()
   .text('🐘 Trending PHP')
   .row()
   .text('🟨 Trending JS Ecosystem')
+  .row()
+  .text('🔥 Streak Ngoding')
+  .text('📅 Rekap Mingguan')
   .resized();
 
 // Helper Fetch GitHub API
@@ -217,6 +220,53 @@ async function handleStats(ctx) {
 bot.command('stats', handleStats);
 bot.hears('📊 Stats Hari Ini', handleStats);
 
+// Handler Streak
+async function handleStreak(ctx) {
+  const state = loadState();
+  const streak = state.streak || 0;
+
+  let msg;
+  if (streak === 0) {
+    msg = `🔥 *Streak Ngoding*\n\nBelum ada streak aktif. Yuk mulai push commit hari ini!`;
+  } else {
+    msg = `🔥 *Streak Ngoding*\n\nKamu udah konsisten commit *${streak} hari* berturut-turut!\nTerakhir aktif: ${state.lastActiveDate || '-'}\n\nJangan putus, boss! 💪`;
+  }
+
+  ctx.reply(msg, { parse_mode: 'Markdown', reply_markup: mainMenu });
+}
+
+bot.command('streak', handleStreak);
+bot.hears('🔥 Streak Ngoding', handleStreak);
+
+// Handler Rekap Mingguan — dibangun dari history harian yang disimpen tiap digest jalan,
+// BUKAN query langsung ke GitHub, karena Events API cuma nyimpen histori terbatas & nggak reliable buat mundur 7 hari.
+async function handleWeekly(ctx) {
+  const state = loadState();
+  const history = state.history || [];
+
+  if (history.length === 0) {
+    return ctx.reply(
+      `📅 *Rekap Mingguan*\n\nBelum ada data histori. Rekap ini otomatis kekumpul tiap hari abis Daily Digest jalan (jam 20:00 WIB) — cek lagi beberapa hari ke depan ya.`,
+      { parse_mode: 'Markdown', reply_markup: mainMenu }
+    );
+  }
+
+  const last7 = history.slice(-7);
+  const totalCommits = last7.reduce((sum, d) => sum + d.count, 0);
+  const activeDays = last7.filter(d => d.count > 0).length;
+
+  let msg = `📅 *Rekap Mingguan* _(${last7.length} hari terakhir)_\n\n`;
+  last7.forEach((d) => {
+    msg += `${d.count > 0 ? '✅' : '⬜'} ${d.date} — ${d.count} commit\n`;
+  });
+  msg += `\n💬 Total: *${totalCommits} commit*\n📆 Hari aktif: *${activeDays}/${last7.length}*\n🔥 Streak saat ini: *${state.streak || 0} hari*`;
+
+  ctx.reply(msg, { parse_mode: 'Markdown', reply_markup: mainMenu });
+}
+
+bot.command('weekly', handleWeekly);
+bot.hears('📅 Rekap Mingguan', handleWeekly);
+
 // --- Logic alert & digest, dipisah dari cron.schedule biar bisa dipanggil ulang buat catch-up ---
 async function runStreakAlert(state) {
   if (!CHAT_ID) return;
@@ -239,9 +289,38 @@ async function runStreakAlert(state) {
 async function runDailyDigest(state) {
   if (!CHAT_ID) return;
   try {
+    const today = todayWibString();
     const { count, repos } = await getTodayCommits();
+
+    // --- Update streak ---
+    // Streak nambah kalau hari ini ada commit DAN hari aktif terakhir adalah kemarin (nyambung).
+    // Kalau hari aktif terakhir bukan kemarin (ada bolong), streak reset mulai dari 1.
+    // Kalau hari ini nggak ada commit, streak putus jadi 0.
+    const yesterday = new Date();
+    yesterday.setDate(yesterday.getDate() - 1);
+    const yesterdayWib = yesterday.toLocaleDateString('sv-SE', { timeZone: 'Asia/Jakarta' });
+
+    if (count > 0) {
+      if (state.lastActiveDate === yesterdayWib) {
+        state.streak = (state.streak || 0) + 1;
+      } else {
+        state.streak = 1;
+      }
+      state.lastActiveDate = today;
+    } else {
+      state.streak = 0;
+    }
+
+    // --- Update history (buat rekap mingguan) ---
+    state.history = state.history || [];
+    // Hindari duplikat entry kalau digest sempat kepanggil 2x di hari yang sama (misal via catch-up)
+    state.history = state.history.filter(d => d.date !== today);
+    state.history.push({ date: today, count });
+    state.history = state.history.slice(-30); // simpan max 30 hari terakhir
+
     let msg = `🌙 *Daily Digest Ngoding — ${new Date().toLocaleDateString('id-ID', { timeZone: 'Asia/Jakarta' })}*\n\n`;
     msg += `🔥 Total Commit Hari Ini: *${count}*\n`;
+    msg += `📈 Streak: *${state.streak} hari*\n`;
     if (repos.length > 0) {
       msg += `📂 Repo Terjamah:\n${repos.map(r => `• ${r}`).join('\n')}\n\n`;
       msg += `Mantap! Pertahankan konsistensinya boss! 💪`;
@@ -250,7 +329,7 @@ async function runDailyDigest(state) {
     }
 
     await bot.api.sendMessage(CHAT_ID, msg, { parse_mode: 'Markdown' });
-    state.lastDigestDate = todayWibString();
+    state.lastDigestDate = today;
     saveState(state);
   } catch (e) {
     console.error('Cron Error (digest):', e.message);
@@ -260,6 +339,30 @@ async function runDailyDigest(state) {
 // CRON JOBS (jalan normal kalau bot nyala persis di jam segitu)
 cron.schedule('0 19 * * *', () => runStreakAlert(loadState()), { timezone: 'Asia/Jakarta' });
 cron.schedule('0 20 * * *', () => runDailyDigest(loadState()), { timezone: 'Asia/Jakarta' });
+
+// Weekly report otomatis, tiap Minggu jam 21:00 WIB (habis daily digest hari itu jalan)
+cron.schedule('0 21 * * 0', async () => {
+  if (!CHAT_ID) return;
+  const state = loadState();
+  const history = state.history || [];
+  if (history.length === 0) return;
+
+  const last7 = history.slice(-7);
+  const totalCommits = last7.reduce((sum, d) => sum + d.count, 0);
+  const activeDays = last7.filter(d => d.count > 0).length;
+
+  let msg = `📅 *Rekap Mingguan Otomatis*\n\n`;
+  last7.forEach((d) => {
+    msg += `${d.count > 0 ? '✅' : '⬜'} ${d.date} — ${d.count} commit\n`;
+  });
+  msg += `\n💬 Total: *${totalCommits} commit*\n📆 Hari aktif: *${activeDays}/${last7.length}*\n🔥 Streak saat ini: *${state.streak || 0} hari*`;
+
+  try {
+    await bot.api.sendMessage(CHAT_ID, msg, { parse_mode: 'Markdown' });
+  } catch (e) {
+    console.error('Cron Error (weekly):', e.message);
+  }
+}, { timezone: 'Asia/Jakarta' });
 
 // --- CATCH-UP: dicek sekali tiap kali bot baru nyala/restart ---
 // Kalau bot sempat mati pas jam 19:00/20:00 lewat, begitu nyala lagi
